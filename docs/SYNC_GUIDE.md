@@ -30,39 +30,51 @@ uv run python main.py sync --options  # 期权
 
 也可以逐表执行（顺序不可颠倒）。首次同步日线等历史数据量较大，受 Tushare 每分钟调用频次限制影响，全量回填可能需要数小时。
 
-### 批量增量刷新 `sync-bulk`（下载脚本已融合进包）
+### 统一 `sync` 命令
 
-`scripts/download_all_v2.py` 的增量语义已包内化为 `zer0share/bulk.py`，并注册为 CLI 子命令 `sync-bulk`：
+`sync` 是唯一公开入口，每张表按能力自动路由到对应引擎：
 
-```bash
-zer0share sync-bulk                                   # 增量刷新全部 39 张表（默认预算 780s）
-zer0share sync-bulk --dry-run                         # 只打印计划：已覆盖到哪天 + 将下载哪些区间，不联网不写盘
-zer0share sync-bulk --tables daily,daily_basic        # 只刷指定表
-zer0share sync-bulk --end 20261031                    # 指定截止日
-zer0share sync-bulk --mode full                       # 原 download_all_v2 全量行为
-zer0share sync-bulk --include-missing                 # 也回补本地从未建成的表（全历史，极慢）
-zer0share sync-bulk --budget-seconds 3600             # 调整时间预算
-```
+| 引擎 | 负责 | 特点 |
+|---|---|---|
+| `bulk` | 缺口检测 + 内存安全的原子合并 | 适合大表与 bulk 独有表（财报/资金流/港股/可转债…） |
+| `job` | 交易日历驱动 + 重试 + 通知 | 适合快照表/期货/期权/ETF/指数 |
 
-安装后即有命令（`[project.scripts] zer0share = "zer0share.cli:cli"`，已 `pip install -e .`）：
+两个引擎写**同一套** catalog 规范布局（时序表 `date=YYYYMMDD/data.parquet`，
+静态表 `data.parquet`，`index_weight` 两级分区 `index_code=*/date=*/`），
+因此混跑不会产生重复拷贝。表名统一用 catalog 规范名（旧名 `daily`/`stock_basic`
+仍作别名接受）。
 
 ```bash
-uv run python -m zer0share.bulk --dry-run   # 等价入口（不走 click）
+zer0share sync --all                              # 全部表
+zer0share sync --dry-run                          # 只打印计划，不联网不写盘
+zer0share sync --topic quote,index                # 按主题
+zer0share sync --table daily_kline                # 单表（可重复）
+zer0share sync --tables daily_kline,daily_basic   # 逗号分隔
+zer0share sync --table daily_kline --start-date 20260101 --end-date 20261021
+zer0share sync --budget-seconds 3600              # 调整 bulk 时间预算
+zer0share sync --include-missing                  # 也回补本地从未建成的表
 ```
 
-与 `sync` 并存是有意的：`sync` 走每日分区规范 + MetaStore 记账；`sync-bulk` 走单文件 +
-`alt_paths` + `date=*` 分区规范，历史数据都按后者落盘，合并到前者会拆成两个文件。
+`--table` 与 `--topic` 同时给出时取并集。旧的主题开关
+`--stock/--futures/--options/--etf/--ricequant` 保留原表清单语义不变。
+`--start-date`/`--end-date` 只对按日分区的表有效，快照表（basic/etf_basic 等）
+给了会直接报错。
+
+bulk 侧另有一个不走 click 的等价入口：`uv run python -m zer0share.bulk --dry-run`。
 
 工程约束（踩坑换来的，勿简化）：
 
 - 覆盖情况只读 parquet footer 统计 + 尾部 row group，绝不整表 pandas 读入
   （`daily_basic` 8.07M×18 整表读入实测 2.98GB RSS，顶爆 cron cgroup 预算）
-- 单文件合并走 pyarrow 按 row group 流式读写 + 原子替换，内存只跟单个 row group 成正比
+- 时序表统一写 `date=*` 分区，走 pyarrow 按 row group 流式读写 + 原子替换，
+  内存只跟单个 row group 成正比
 - 沿用旧文件压缩算法（`daily_basic` 原是 polars zstd，改 snappy 文件涨 53%；zstd 显式 level 3）
 - 从未建成的表默认不发请求（否则每晚从零回补 1645 个交易日 → 3600s 窗口必超时）；
   `--include-missing` 可显式开启
-- 预算耗尽后剩余表标 `DEFERRED(budget)`，exit code 仍按核心表（daily/daily_basic/adj_factor/
-  stk_limit/suspend_d/index_daily/index_weight）覆盖判定：齐全 0，有缺口 3
+- 预算耗尽后剩余表标 `DEFERRED(budget)`（默认 780s，仅约束 bulk 引擎），
+  exit code 仍按核心表覆盖判定：齐全 0，有缺口 3
+- 按日接口首屏恰好 5000 行时自动 offset 翻页（`adj_factor`/`basic` 实测单日
+  超过 5000，不翻页会静默丢 10% 数据）
 
 ### 股票核心（必选）
 

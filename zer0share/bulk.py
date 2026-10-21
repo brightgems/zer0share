@@ -4,23 +4,23 @@
 融合进包后能力与增量语义一字不改，只把「硬编码常量」换成「可配置」：
 
   * TOKEN / HTTP_URL  → config/settings.toml 的 [tushare] 段（不再硬编码凭证）
-  * 输出路径          → [paths].data_dir 派生（stock/macro/us/hk/index）
+  * 输出路径          → [paths].data_dir + catalog spec 的 path_parts 派生
   * print             → loguru（走 zer0share.logging 初始化）
-  * CLI               → `zer0share sync-bulk` 子命令（argparse 原样保留，
-                        与逐表 `sync` 命令并存）
+  * CLI               → 由统一 `zer0share sync` 命令按表路由调用（argparse 原样保留）
 
-两套命令并存是有意的：
-  `zer0share sync`      走 zer0share.sync 的每日分区规范 + MetaStore 记账
-  `zer0share sync-bulk` 走 download_all_v2 的单文件 + alt_paths + date=* 分区规范，
-                        历史数据都按后者落盘，合并到前者会拆成两个文件。
+本模块是 `sync` 命令的两个引擎之一，只负责「拉数据 + 按 catalog 规范布局落盘」：
+  * 时序表一律写 <name>/date=YYYYMMDD/data.parquet 分区（不再写单文件）
+  * 静态表 / 快照表不在本模块职责内（由 job 引擎 zer0share.sync 负责）
+  * 落盘位置只由 catalog.parquet_pattern 一处定义，避免与 job 引擎产出两份拷贝
 
 保留原脚本的关键工程约束（都是踩坑换来的，勿简化）：
   * 覆盖情况一律读 parquet footer 统计 + 尾部 row group，绝不整表 pandas 读入
     （daily_basic 8.07M×18 整表读入实测 2.98GB RSS，顶爆 cron cgroup 预算）
-  * 单文件合并走 pyarrow 按 row group 流式读写，内存只跟单 row group 成正比
-  * 沿用旧文件压缩算法（daily_basic 原是 polars zstd，改 snappy 文件涨 53%）
+  * 分区写入走 pyarrow 按 row group 流式读写 + 原子替换，内存只跟单 row group 成正比
+  * 沿用旧文件压缩算法（daily_basic 原是 polars zstd，改 snappy 文件涨 53%；zstd 显式 level 3）
   * 从未建成的表默认不发请求，否则每晚从零回补 1645 个交易日 → 3600s 窗口必超时
   * 预算耗尽后剩余表标 DEFERRED(budget)，exit code 仍按核心表覆盖判定
+  * 按日接口首屏恰好 5000 行时自动 offset 翻页，防止静默截断
 """
 
 from __future__ import annotations
@@ -63,9 +63,9 @@ _DEADLINE: float | None = None  # time.time() 形式的预算截止点；None = 
 READ_FAILED = object()  # read_old_safe 的哨兵：现有文件存在但读不出来
 
 # ---------------------------------------------------------------- 主题分组
-# 对齐 sync 命令的 --stock/--futures/--options/--etf 主题开关, 让 sync-bulk 也能按主题下载。
-# 注意两套命令的**表名与落盘规范不同** (sync 走每日分区+MetaStore, sync-bulk 走单文件),
-# 这里列的是 sync-bulk 侧的表名, 与 sync 的 STOCK_TABLES 等不是同一套。
+# 对齐统一 sync 命令的主题开关, 让 bulk 引擎也能按主题取表。
+# 注意这里列的是 bulk 侧的表名 (daily/daily_basic/...), 与 catalog 规范名
+# (daily_kline) 有历史差异; 统一 sync 入口由 sync_plan.TABLE_ALIASES 负责归一。
 BULK_TOPICS: dict[str, list[str]] = {
     "quote": ["daily", "weekly", "monthly", "adj_factor", "daily_basic", "stk_limit", "suspend_d"],
     "fundflow": ["moneyflow", "moneyflow_ind", "moneyflow_hsgt", "margin_detail", "hk_hold"],
@@ -408,14 +408,20 @@ def _err_key(err: BaseException) -> str:
 
 
 def batch_by_date(pro, api_name, date_col="trade_date", name="", sleep=0.15, dates=None,
-                  paginate=False, page_size=5000, max_pages=200):
+                  paginate=None, page_size=5000, max_pages=200):
     """按日期批量下载 (dates=None 时沿用原 START~END 工作日序列)
     返回 (df, err_summary): df=None 时 err_summary 非空, 形如
     "N/M 天失败: upstream_pool_exhausted x1, ..." — 调用方据此区分
     「数据未就绪」(upstream_pool_exhausted / 空返回) 与「凭证/网络故障」。
 
-    paginate=True: 单日 offset 分页拉全量。moneyflow 一类接口单次上限 5000 行,
-    而全市场日资金流约 5575 只 (实测), 不分页每天静默丢 575 行 ≈ 10%。
+    分页 (paginate):
+      paginate=None (默认) — **自动**: 先普通取一页, 若返回行数正好等于接口上限
+      (5000) 就继续 offset 翻页。因为"正好 5000 行"既可能是真实满页, 也可能是
+      被截断 —— 不翻页就分不清, 而误判成未截断会静默丢数据。
+      实测: adj_factor 单日真实 5578 行, 不翻页只拿到 5000 (丢 578 行 ≈ 10%);
+      daily/daily_basic/stk_limit 实测不触及上限, 自动翻页不会多发请求。
+      paginate=True — 强制翻页 (明确知道该接口会超上限时)。
+      paginate=False — 强制不翻页。
     """
     if dates is None:
         dates = get_trade_dates(START, END)
@@ -424,23 +430,38 @@ def batch_by_date(pro, api_name, date_col="trade_date", name="", sleep=0.15, dat
     errs: dict[str, int] = {}
 
     def _fetch_day(d):
-        """单日数据: 不分页直接返回; 分页则 offset 循环直至取空。"""
-        if not paginate:
+        """单日数据: 自动/强制分页, offset 循环直至取不满一页。"""
+        if paginate is False:
             return call_api(pro, getattr(pro, api_name), {date_col: d})
-        parts, offset, err = [], 0, None
-        for _ in range(max_pages):
-            if budget_exhausted():
-                break
+        # 自动模式: 先取第一页 (不带 offset), 满页才继续翻
+        if paginate is True:
             df, err = call_api(pro, getattr(pro, api_name),
-                               {date_col: d, "offset": offset, "limit": page_size})
+                               {date_col: d, "offset": 0, "limit": page_size})
             if err is not None:
                 return None, err
-            if df is None or len(df) == 0:
-                break
+        else:
+            df, err = call_api(pro, getattr(pro, api_name), {date_col: d})
+            if err is not None:
+                return None, err
+            if df is None or len(df) < page_size:
+                return df, None
+        parts, offset = [], 0
+        if df is not None and len(df):
             parts.append(df)
-            if len(df) < page_size:  # 取满才可能有下一页
+            offset = len(df)
+        while len(parts) < max_pages:
+            if budget_exhausted():
                 break
-            offset += len(df)
+            nxt, err = call_api(pro, getattr(pro, api_name),
+                                {date_col: d, "offset": offset, "limit": page_size})
+            if err is not None:
+                return None, err
+            if nxt is None or len(nxt) == 0:
+                break
+            parts.append(nxt)
+            if len(nxt) < page_size:  # 取不满 → 已是最后一页
+                break
+            offset += len(nxt)
             time.sleep(sleep)
         if not parts:
             return None, err
@@ -717,11 +738,17 @@ def has_local_data(spec, dirs):
 
 def write_partitions(df, root, spec, name):
     """把按日下载的数据写成 <root>/date=YYYYMMDD/data.parquet 分区 (adj_factor 的活布局)。
-    已存在的分区按业务主键去重合并, 保证可重跑。"""
+    已存在的分区按业务主键去重合并, 保证可重跑。
+
+    schema 一致性: 新下载可能比历史分区多列 (如 daily 的 ah_vol/ah_amount,
+    历史分区仅 11 列)。直接写会让同一张表出现两种 schema, duckdb union_by_name
+    虽能读, 但按位置取列的下游会错位。因此写入前按「同表已有分区或 spec.columns」
+    裁剪列集, 保持全表 schema 唯一。"""
     date_col = spec.get("date_col", "trade_date")
     if df is None or len(df) == 0 or date_col not in df.columns:
         logger.info(f"  ⚠️ {name}: 无可写分区数据 ({date_col} 列缺失或空)")
         return 0
+    df = _align_partition_schema(df, root, spec, name)
     keys = dedup_keys(df, spec)
     dcol = df[date_col].astype(str).str.replace("-", "").str.slice(0, 8)
     wrote = rows = 0
@@ -749,6 +776,82 @@ def write_partitions(df, root, spec, name):
             logger.info(f"  ⚠️ {name}: 分区 {d} 写入失败 {str(e)[:80]}")
     logger.info(f"  ✅ {name}: {rows:,} 行 → {wrote} 个 date=* 分区 ({root})")
     return wrote
+
+
+def _align_partition_schema(df, root, spec, name):
+    """统一该表分区的列集, 保证全表 schema 唯一。
+
+    判定顺序:
+      1. 既有分区 schema (磁盘事实) — 权威;
+      2. spec.columns (catalog 声明);
+      3. 新数据自身列集。
+
+    - 新数据列更多 (如 daily 新下的带 ah_vol/ah_amount, 历史分区仅 11 列):
+      保留新数据的列并回填既有分区 — 否则 spec 永远追不上数据, 且新增列
+      每批都被悄悄裁掉, 数据永久丢失。
+    - 新数据列更少: 按 spec.columns 补齐 (缺失列填 None), 不破坏既有分区。
+    - 新分区首建 (无既有分区): 按 spec.columns 定序。
+    """
+    import glob as _glob
+    import pyarrow.parquet as _pq
+    want = None
+    if os.path.isdir(root):
+        existing = sorted(_glob.glob(os.path.join(root, "date=*", "data.parquet")))
+        if existing:
+            try:
+                want = list(_pq.ParquetFile(existing[-1]).schema_arrow.names)
+            except Exception:
+                want = None
+    if want is None:
+        want = list(spec.get("columns") or df.columns)
+    new_cols = list(df.columns)
+    if new_cols == want:
+        return df
+    # 新数据是超集: 扩展既有分区, 保留新列
+    extra_new = [c for c in new_cols if c not in want]
+    missing_new = [c for c in want if c not in new_cols]
+    if extra_new and not missing_new:
+        target = want + extra_new
+        logger.info(f"  🔧 {name}: 既有分区少列 {extra_new} → 扩展分区 schema (回填空值)")
+        _extend_partition_schema(root, want, target)
+        return df[target]
+    # 新数据列更少: 补齐 spec.columns
+    if not new_cols:
+        return df
+    keep = [c for c in want if c in new_cols]
+    missing = [c for c in want if c not in new_cols]
+    if not keep:
+        return df
+    out = df[keep].copy()
+    for c in missing:
+        out[c] = None
+    logger.info(f"  🔧 {name}: 列集对齐分区 schema "
+                f"(+{len(missing)} 缺失列填空 / -{len(new_cols) - len(keep)} 多出列裁掉)")
+    return out[want]
+
+
+def _extend_partition_schema(root, old_cols, new_cols):
+    """给 root 下既有分区补列 (新列填 None), 保持全表 schema 唯一。
+
+    只在调用方确认新数据列是既有分区的超集时调用; 逐个分区原子替换,
+    单分区失败不影响其他分区 (下次同步仍会尝试)。
+    """
+    import glob as _glob
+    import pyarrow as pa
+    import pyarrow.parquet as _pq
+    add = [c for c in new_cols if c not in old_cols]
+    for fp in sorted(_glob.glob(os.path.join(root, "date=*", "data.parquet"))):
+        try:
+            tbl = _pq.read_table(fp)
+            for c in add:
+                if c not in tbl.column_names:
+                    tbl = tbl.append_column(pa.field(c, pa.string()),
+                                            pa.array([None] * tbl.num_rows))
+            tmp = fp + ".tmp"
+            _pq.write_table(tbl, tmp)
+            os.replace(tmp, fp)
+        except Exception:
+            continue
 
 
 def write_streamed(path, new, spec, name):
@@ -959,13 +1062,17 @@ def inc_date_table(pro, spec, args, end, dirs):
         return
     # 单文件不存在时, 覆盖情况必须取自 <name>/date=* 分区目录 (adj_factor 的活布局);
     # 不修这里就会一直误判『文件不存在』→ 每次全历史回补 1645 天 → 定时任务超时。
-    part_root = None
+    # 时序表统一写 date=* 分区 (catalog spec 的规范布局): 单文件只作为旧布局的覆盖来源,
+    # 不再写入 — 否则同一张表会同时存在两份拷贝, 且 query 层只认分区那份。
+    # 因此覆盖日期必须取「单文件与分区中较新者」: 单文件停在 20260930 而分区已到
+    # 20261020 时 (或反之), 只看单文件会把分区已覆盖的日期重新下一遍。
+    part_root = partition_dir_of(spec, dirs)
     cov_printed = False
-    if last is None:
-        part_root = partition_dir_of(spec, dirs)
-        if part_root:
-            pds = partition_dates(part_root)
-            last = pds[-1]
+    if part_root:
+        pds = partition_dates(part_root)
+        p_last = pds[-1] if pds else None
+        if p_last is not None and (last is None or str(p_last) > str(last)):
+            last = p_last
             logger.info(f"  已覆盖: {last} (取自 date=* 分区 {part_root}, 共 {len(pds)} 个分区) "
                         f"→ 只补缺口, 不重下历史")
             cov_printed = True
@@ -973,6 +1080,16 @@ def inc_date_table(pro, spec, args, end, dirs):
     # 非 optional 表缺文件时保留首次建表语义 (全历史回填), 但起点不早于 START
     if plan_start < START:
         plan_start = START
+    # 显式 --start 覆盖自动起点 (统一 sync 的 --start-date 语义):
+    # 但不能早于已覆盖的最后一天 —— 早于它只会重下已有数据, 没有意义。
+    if getattr(args, "start", None):
+        want_start = args.start
+        if last and want_start <= last:
+            logger.info(f"  --start={want_start} 不晚于已覆盖的 {last}, 只补 {next_day(last)} 起的缺口")
+        else:
+            plan_start = max(plan_start, want_start) if last else want_start
+            if plan_start < START:
+                plan_start = START
     dates, note = plan_trade_dates(dirs, plan_start, end, use_api=not args.dry_run, pro=pro)
     if last and not cov_printed:
         bits = []
@@ -992,21 +1109,20 @@ def inc_date_table(pro, spec, args, end, dirs):
     if args.dry_run:
         return
     new, err = batch_by_date(pro, spec.get("api", name), date_col=spec.get("date_col", "trade_date"),
-                             name=name, dates=dates, paginate=spec.get("paginate", False))
+                             name=name, dates=dates, paginate=spec.get("paginate"))
     if new is None or len(new) == 0:
         logger.info(f"  ⚠️ {name}: 计划区间无数据返回" + (f" — {err}" if err else ""))
         return
     if err:
         logger.info(f"  ⚠️ {name}: 部分日期失败 — {err}")
     new = clean_df(new)
-    if part_root:
-        write_partitions(new, part_root, spec, name)
-        return
-    if os.path.exists(path):
-        write_streamed(path, new, spec, name)
-        return
-    merged = merge_rows(None, new, spec, name)
-    write_atomic(merged, path, name)
+    # 时序表统一写 date=* 分区。spec 未声明 partition_dir 时, 按 catalog 规范
+    # 用 <OUTPUT>/<name>/ 派生; 这样即使本地只有旧布局的单文件, 新数据也落在
+    # query 层唯一认得的规范位置, 不会再造出第二份拷贝。
+    if part_root is None:
+        part_root = os.path.join(dirs["OUTPUT"], name)
+    write_partitions(new, part_root, spec, name)
+    return
 
 
 def inc_stock_table(pro, spec, args, end, ctx, dirs):
@@ -1036,6 +1152,10 @@ def inc_stock_table(pro, spec, args, end, ctx, dirs):
         return
     # 重叠窗口起点夹到 START 附近, 避免老股票(最新日期贴近 START)的窗口早于项目起点
     windows = [(c, max(days_ago(covered[c], 365), START) if covered.get(c) else START, end) for c in need]
+    want_start = getattr(args, "start", None)
+    if want_start:
+        # 显式 --start: 把每只股票的窗口起点抬到该日期 (只补这段区间的缺口)
+        windows = [(c, max(s, want_start), e) for c, s, e in windows]
     first_start = min(w[1] for w in windows)
     logger.info(f"  计划下载: {len(need)} 只 (其中 {fresh} 只无历史, 从 {START} 起; "
                 f"其余从自身最新日期前 365 天重叠, 窗口末端 {end}), 并集 {first_start} ~ {end}"
@@ -1076,6 +1196,9 @@ def inc_code_table(pro, spec, args, end, dirs):
         logger.info(f"  ✅ 无需下载: 全部已覆盖至 {thr}")
         return
     windows = [(c, next_day(covered[c]) if covered.get(c) else START, end) for c in need]
+    want_start = getattr(args, "start", None)
+    if want_start:
+        windows = [(c, max(s, want_start), e) for c, s, e in windows]
     first_start = min(w[1] for w in windows)
     logger.info(f"  计划下载: {len(need)} 个代码 (其中 {fresh} 个无历史, 从 {START} 起; "
                 f"其余从自身最新日期次日起), 窗口并集 {first_start} ~ {end}; 例: {need[:3]}")
@@ -1113,6 +1236,9 @@ def inc_quarter_table(pro, spec, args, end):
     else:
         logger.info(f"  ⚠️ {name}: 现有文件缺少 end_date 列 → 全部季度按未覆盖处理")
     quarters = [q for q in quarter_ends(START, end) if q not in covered]
+    want_start = getattr(args, "start", None)
+    if want_start:
+        quarters = [q for q in quarters if q >= want_start]
     if not quarters:
         logger.info(f"  ✅ 无需下载: 所有季度已覆盖")
         return
@@ -1230,10 +1356,56 @@ def _stock(name, title, coverage, expected, key, date_col, range_=True, codes_fr
                 key=key, date_col=date_col, range=range_, codes_from=codes_from)
 
 
-def _date(name, title, path=None, api=None, optional=False, dirs=None, paginate=False):
+def _cat_partition_dir(name, cfg, dirs):
+    """从 catalog spec 派生该表的规范分区目录 (data_dir + path_parts)。
+
+    bulk 与 catalog 的表名有历史差异 (bulk daily ↔ catalog daily_kline),
+    因此逐个尝试候选名, 命中即返回目录路径; 未命中返回 None (调用方退回
+    <OUTPUT>/<name>)。这样写入位置只由 catalog 这一处定义, 不会再次漂移。
+
+    注意 catalog.path_parts 含 market 段 (如 stock/daily_kline), 而 dirs["OUTPUT"]
+    已经是 <data_dir>/stock — 所以必须从 cfg.data_dir 起算, 否则会拼出
+    <data_dir>/stock/stock/... 这种重复段。
+    """
+    try:
+        import zer0share.catalog as _cat
+    except Exception:
+        return None
+    specs = {v.name: v for v in vars(_cat).values()
+             if hasattr(v, "name") and hasattr(v, "path_parts")}
+    cands = [name] if name.endswith("_kline") else [name, f"{name}_kline"]
+    for c in cands:
+        s = specs.get(c)
+        if s is not None and s.parquet_pattern == "date=*/data.parquet":
+            parts = list(s.path_parts)
+            # 磁盘既有分区目录可能用别名 (sync 遗留): stk_limit ↔ stk_limit_dir,
+            # daily_kline ↔ daily。优先复用已有分区的真实目录名, 否则会造出
+            # 第二个空分区目录, 而 query 层仍读旧目录 → 数据永远读不到。
+            for alt in _partition_dir_aliases(c):
+                cand = os.path.join(str(cfg.data_dir), *parts[:-1], alt)
+                if partition_dates(cand):
+                    return cand
+            return os.path.join(str(cfg.data_dir), *parts)
+    return None
+
+
+def _partition_dir_aliases(name):
+    """磁盘上可能出现的分区目录别名 (按优先级)。"""
+    base = [name]
+    if name.endswith("_kline"):
+        base.append(name[: -len("_kline")])
+    if name.endswith("_dir"):
+        base.append(name[: -len("_dir")])
+    else:
+        base.append(f"{name}_dir")
+    return base
+
+
+def _date(name, title, path=None, api=None, optional=False, cfg=None, dirs=None, paginate=None):
     return dict(name=name, title=title, kind="date", api=api or name,
                 path=path or f"{dirs['OUTPUT']}/{name}.parquet", date_col="trade_date",
-                optional=optional, paginate=paginate)
+                optional=optional, paginate=paginate,
+                partition_dir=_cat_partition_dir(name, cfg, dirs) or os.path.join(dirs["OUTPUT"], name))
 
 
 # legacy 表的 fetch 走模块级 _PRO（build_tables 时 pro 可能还没建，故延迟绑定）
@@ -1264,7 +1436,7 @@ def _fetch_repo_daily(end):
     return _PRO.repo_daily(ts_code="204001.SH", start_date=START, end_date=end)
 
 
-def build_tables(dirs) -> list[dict]:
+def build_tables(dirs, cfg=None) -> list[dict]:
     """表注册表（与 scripts/download_all_v2.py 的 TABLES 逐字段等价）。
 
     路径由 data_dir 派生；原脚本硬编码的 TOKEN/HTTP_URL 不在此处，改由 make_pro() 从
@@ -1276,22 +1448,22 @@ def build_tables(dirs) -> list[dict]:
         dict(name="stock_basic", title="[0] 获取股票列表", kind="legacy",
              path=f"{OUTPUT}/stock_basic.parquet", api="stock_basic",
              fetch=_fetch_stock_basic),
-        _date("daily", "[1] daily (日线行情)", dirs=dirs),
-        _date("weekly", "[2] weekly (周线)", dirs=dirs),
-        _date("monthly", "[3] monthly (月线)", dirs=dirs),
-        _date("adj_factor", "[4] adj_factor (复权因子)", dirs=dirs),
-        _date("daily_basic", "[5] daily_basic (每日指标)", dirs=dirs),
+        _date("daily", "[1] daily (日线行情)", dirs=dirs, cfg=cfg),
+        _date("weekly", "[2] weekly (周线)", dirs=dirs, cfg=cfg),
+        _date("monthly", "[3] monthly (月线)", dirs=dirs, cfg=cfg),
+        _date("adj_factor", "[4] adj_factor (复权因子)", dirs=dirs, cfg=cfg),
+        _date("daily_basic", "[5] daily_basic (每日指标)", dirs=dirs, cfg=cfg),
         # moneyflow 单日全市场约 5575 行 > 接口单次 5000 上限, 必须 offset 分页,
         # 否则每天静默丢 575 行 (≈10%)。实测两端点分页均可用 (offset=5000 → 575 行)。
-        _date("moneyflow", "[6] moneyflow (资金流向)", dirs=dirs, paginate=True),
+        _date("moneyflow", "[6] moneyflow (资金流向)", dirs=dirs, paginate=True, cfg=cfg),
         # moneyflow_ind 两端点均未开放 (unknown_api / api_not_enabled), 保留注册项,
         # 缺文件时按 optional 处理, 不影响其他表
-        _date("moneyflow_ind", "[6A] moneyflow_ind (行业资金流)", dirs=dirs, optional=True),
-        _date("moneyflow_hsgt", "[6B] moneyflow_hsgt (沪深港通资金流向)", dirs=dirs),
-        _date("margin_detail", "[7] margin_detail (融资融券)", dirs=dirs),
-        _date("hk_hold", "[8] hk_hold (沪深港通持股)", dirs=dirs),
-        _date("top_list", "[9] top_list (龙虎榜)", dirs=dirs),
-        _date("top_inst", "[10] top_inst (龙虎榜机构)", dirs=dirs),
+        _date("moneyflow_ind", "[6A] moneyflow_ind (行业资金流)", dirs=dirs, optional=True, cfg=cfg),
+        _date("moneyflow_hsgt", "[6B] moneyflow_hsgt (沪深港通资金流向)", dirs=dirs, cfg=cfg),
+        _date("margin_detail", "[7] margin_detail (融资融券)", dirs=dirs, cfg=cfg),
+        _date("hk_hold", "[8] hk_hold (沪深港通持股)", dirs=dirs, cfg=cfg),
+        _date("top_list", "[9] top_list (龙虎榜)", dirs=dirs, cfg=cfg),
+        _date("top_inst", "[10] top_inst (龙虎榜机构)", dirs=dirs, cfg=cfg),
         _stock("income", "[11] income (利润表)",
                ["announce_date", "end_date"], "quarter", ["ts_code", "end_date", "report_type"], "end_date", dirs=dirs),
         _stock("balancesheet", "[12] balancesheet (资产负债表)",
@@ -1314,8 +1486,8 @@ def build_tables(dirs) -> list[dict]:
                ["ann_date"], "quarter", ["ts_code", "ann_date", "name", "title"], "ann_date", range_=False, dirs=dirs),
         _stock("stk_rewards", "[21] stk_rewards (高管薪酬)",
                ["ann_date", "end_date"], "quarter", ["ts_code", "end_date", "name"], "end_date", range_=False, dirs=dirs),
-        _date("stk_limit", "[22] stk_limit (涨跌停价)", dirs=dirs),
-        _date("suspend_d", "[23] suspend_d (停复牌)", dirs=dirs),
+        _date("stk_limit", "[22] stk_limit (涨跌停价)", dirs=dirs, cfg=cfg),
+        _date("suspend_d", "[23] suspend_d (停复牌)", dirs=dirs, cfg=cfg),
         dict(name="index_daily", title="[24] index_daily (指数日线)", kind="code", api="index_daily",
              path=f"{INDEX_OUTPUT}/index_daily.parquet", alt_paths=[f"{OUTPUT}/index_daily.parquet"],
              codes=INDEX_CODES, date_col="trade_date"),
@@ -1324,7 +1496,7 @@ def build_tables(dirs) -> list[dict]:
              path=f"{INDEX_OUTPUT}/index_weight.parquet", alt_paths=[f"{OUTPUT}/index_weight.parquet"],
              date_col="trade_date", key=["index_code", "con_code", "trade_date"]),
         _date("index_dailybasic", "[26] index_dailybasic (指数每日指标)",
-              path=f"{INDEX_OUTPUT}/index_dailybasic.parquet", optional=True, dirs=dirs),
+              path=f"{INDEX_OUTPUT}/index_dailybasic.parquet", optional=True, dirs=dirs, cfg=cfg),
         dict(name="sw_daily", title="[27] sw_daily (申万行业日线)", kind="code", api="sw_daily",
              path=f"{INDEX_OUTPUT}/sw_daily.parquet", alt_paths=[f"{OUTPUT}/sw_daily.parquet"],
              codes=SW_CODES, date_col="trade_date"),
@@ -1347,9 +1519,9 @@ def build_tables(dirs) -> list[dict]:
              path=f"{US_OUTPUT}/us_daily.parquet", api="us_daily", api_name="us_daily",
              fetch=_fetch_us_daily),
         _date("shibor", "[32] shibor (上海银行间同业拆放利率)",
-              path=f"{MACRO_OUTPUT}/shibor.parquet", dirs=dirs),
+              path=f"{MACRO_OUTPUT}/shibor.parquet", dirs=dirs, cfg=cfg),
         _date("repurchase", "[33] repurchase (国债回购利率)",
-              path=f"{MACRO_OUTPUT}/repurchase.parquet", dirs=dirs),
+              path=f"{MACRO_OUTPUT}/repurchase.parquet", dirs=dirs, cfg=cfg),
         dict(name="repo_daily", title="[34] repo_daily (国债回购日线)", kind="legacy",
              path=f"{MACRO_OUTPUT}/repo_daily.parquet", api="repo_daily", tolerant=True,
              fetch=_fetch_repo_daily),
@@ -1366,6 +1538,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="逗号分隔表名过滤, 如 moneyflow,moneyflow_ind; 留空=全部")
     ap.add_argument("--end", default=None,
                     help=f"截止日期 yyyymmdd, 默认: incremental=今天, full=原 END({END})")
+    ap.add_argument("--start", default=None,
+                    help="起始日期 yyyymmdd (增量模式下只补这一天起的缺口; "
+                         "早于本地已覆盖的最后一天时无效)")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印计划: 每张表已覆盖到的最后日期 + 将下载的范围; 不发网络请求、不写文件")
     ap.add_argument("--include-missing", action="store_true",
@@ -1440,7 +1615,7 @@ def main(argv=None) -> int:
     pro = make_pro(cfg)
 
     end = args.end or (END if args.mode == "full" else datetime.now().strftime("%Y%m%d"))
-    tables = build_tables(dirs)
+    tables = build_tables(dirs, cfg)
     selected = order_tables(select_tables(args.tables, tables, getattr(args, "topic", "")))
     t0 = time.time()
     budget = None

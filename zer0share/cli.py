@@ -13,7 +13,15 @@ from zer0share.quality.runner import QualityRunner
 from zer0share.quality.targets import select_targets
 from zer0share.sources import DataSources, RiceQuantFetcher, TushareFetcher
 from zer0share.storage import MetaStore
+from zer0share import sync_plan as SP
 from zer0share.universe import build_universes, build_universes_range
+
+
+def bulk_budget_default() -> float:
+    """bulk 引擎默认时间预算 (秒)。"""
+    from zer0share.bulk import DEFAULT_BUDGET_SECONDS
+
+    return float(DEFAULT_BUDGET_SECONDS)
 
 
 def _validate_date(ctx, param, value):
@@ -121,19 +129,40 @@ SYNC_TABLES = [
 @cli.command()
 @click.option(
     "--table",
-    type=click.Choice(SYNC_TABLES),
-    default=None,
+    "tables",
+    multiple=True,
+    help="指定表 (可重复, 也可逗号分隔)。表名用 catalog 规范名, 如 daily_kline / basic",
 )
-@click.option("--all", "sync_all", is_flag=True, default=False)
-@click.option("--stock", "sync_stock", is_flag=True, default=False)
-@click.option("--futures", "sync_futures", is_flag=True, default=False)
-@click.option("--options", "sync_options", is_flag=True, default=False)
-@click.option("--etf", "sync_etf", is_flag=True, default=False)
-@click.option("--ricequant", "sync_ricequant", is_flag=True, default=False)
+@click.option("--tables", "tables_csv", default="",
+              help="逗号分隔表名, 与 --table 等价 (两者取并集)")
+@click.option("--topic", default="",
+              help=f"按主题同步, 逗号分隔; all=全部主题。可选: {','.join(SP.ALL_TOPICS)}。"
+                   "与 --table 同时给出时取并集")
+@click.option("--all", "sync_all", is_flag=True, default=False, help="同步全部表")
+@click.option("--stock", "sync_stock", is_flag=True, default=False,
+              help="[兼容] 股票主题 (= --topic quote)")
+@click.option("--futures", "sync_futures", is_flag=True, default=False,
+              help="[兼容] 期货主题 (= --topic futures)")
+@click.option("--options", "sync_options", is_flag=True, default=False,
+              help="[兼容] 期权主题 (= --topic options)")
+@click.option("--etf", "sync_etf", is_flag=True, default=False,
+              help="[兼容] ETF 主题 (= --topic etf)")
+@click.option("--ricequant", "sync_ricequant", is_flag=True, default=False,
+              help="[兼容] RiceQuant 主题 (= --topic ricequant)")
 @click.option("--start-date", default=None, callback=_validate_date)
 @click.option("--end-date", default=None, callback=_validate_date)
+@click.option("--end", "end_alias", default=None, callback=_validate_date,
+              help="截止日期 (与 --end-date 等价)")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="只打印计划, 不发网络请求、不写文件")
+@click.option("--include-missing", is_flag=True, default=False,
+              help="也回补本地从未建成的表 (全历史, 极慢)")
+@click.option("--budget-seconds", type=float, default=None,
+              help=f"时间预算秒数 (默认 {bulk_budget_default():.0f})")
 def sync(
-    table: str | None,
+    tables: tuple[str, ...],
+    tables_csv: str,
+    topic: str,
     sync_all: bool,
     sync_stock: bool,
     sync_futures: bool,
@@ -142,97 +171,114 @@ def sync(
     sync_ricequant: bool,
     start_date: str | None,
     end_date: str | None,
+    end_alias: str | None,
+    dry_run: bool,
+    include_missing: bool,
+    budget_seconds: float | None,
 ) -> None:
-    """同步数据。"""
+    """同步数据 (统一入口)。
+
+    表名统一用 catalog 规范名, 每张表按能力自动路由到对应引擎:
+      * bulk 引擎 — 缺口检测 + 内存安全的原子合并, 适合大表与 bulk 独有表
+      * job 引擎  — 交易日历驱动 + 重试 + 通知, 适合快照表/期货/期权/ETF
+
+    两引擎写同一套 catalog 规范布局 (时序表 date=YYYYMMDD/data.parquet,
+    静态表 data.parquet), 因此混跑不会产生重复拷贝。
+
+    例:
+      zer0share sync --all
+      zer0share sync --topic quote,index
+      zer0share sync --table daily_kline --table basic
+      zer0share sync --tables daily_kline,daily_basic
+      zer0share sync --all --dry-run
+    """
+    if end_alias and end_date and end_alias != end_date:
+        raise click.UsageError("--end 与 --end-date 不一致")
+    end_date = end_date or end_alias
+
     if end_date is not None and start_date is None:
         raise click.UsageError("--end-date requires --start-date")
     if start_date is not None and end_date is not None and end_date < start_date:
         raise click.UsageError("--end-date must be on or after --start-date")
 
-    with _make_pipeline() as pipeline:
-        if table is not None and (start_date is not None or end_date is not None):
-            job = pipeline.registry.get(table)
-            if job is not None and not job.supports_date_range:
-                raise click.UsageError("date range options are only supported for daily partitioned tables")
+    # 收集表名: --table (可重复) + --tables (逗号) + 主题开关
+    wanted: list[str] = []
+    for t in tables:
+        wanted.extend(x for x in t.split(",") if x.strip())
+    wanted.extend(x for x in tables_csv.split(",") if x.strip())
 
-        if sync_all:
-            pipeline.run_all(start_date=start_date, end_date=end_date)
-        elif sync_stock:
-            for t in STOCK_TABLES:
-                pipeline.run(t, start_date=start_date, end_date=end_date)
-        elif sync_futures:
-            for t in FUTURES_TABLES:
-                pipeline.run(t, start_date=start_date, end_date=end_date)
-        elif sync_options:
-            for t in OPTIONS_TABLES:
-                pipeline.run(t, start_date=start_date, end_date=end_date)
-        elif sync_etf:
-            for t in ETF_TABLES:
-                pipeline.run(t, start_date=start_date, end_date=end_date)
-        elif sync_ricequant:
-            for t in RICEQUANT_TABLES:
-                pipeline.run(t, start_date=start_date, end_date=end_date)
-        elif table is not None:
-            pipeline.run(table, start_date=start_date, end_date=end_date)
-        else:
-            raise click.UsageError("需要指定 --table、--stock、--futures、--options、--etf、--ricequant 或 --all")
+    legacy_flags = {
+        "stock": sync_stock,
+        "futures": sync_futures,
+        "options": sync_options,
+        "etf": sync_etf,
+        "ricequant": sync_ricequant,
+    }
+    topics: list[str] = []
+    for t in topic.split(","):
+        t = t.strip()
+        if not t:
+            continue
+        if t.lower() == "all":
+            topics.extend(SP.ALL_TOPICS)
+            continue
+        resolved = SP.resolve_topic(t)
+        if resolved is None:
+            raise click.UsageError(
+                f"未知主题: {t}｜可用主题: {','.join(SP.ALL_TOPICS)}"
+            )
+        topics.append(resolved)
+    for topic_name in dict.fromkeys(topics):
+        wanted.extend(SP.tables_for_topic(topic_name))
 
+    # 旧开关保持原语义: 各自的历史表清单 (不是新的功能主题)
+    for flag_name, enabled in legacy_flags.items():
+        if enabled:
+            wanted.extend(SP.LEGACY_FLAG_TABLES[flag_name])
 
-@cli.command("sync-bulk")
-@click.option(
-    "--mode",
-    type=click.Choice(["incremental", "full"]),
-    default="incremental",
-    show_default=True,
-    help="incremental=按缺口增量刷新；full=原 download_all_v2 全量行为",
-)
-@click.option("--tables", default="", help="逗号分隔表名过滤，如 moneyflow,moneyflow_ind；留空=全部")
-@click.option("--topic", default="",
-              help="按主题下载，逗号分隔；all=全部主题。可选: quote,fundflow,toplist,finance,"
-                   "index,bond,fund,us,macro。与 --tables 同时给出时取并集")
-@click.option("--end", default=None, callback=_validate_date, help="截止日期 YYYYMMDD，默认 incremental=今天")
-@click.option("--dry-run", is_flag=True, default=False, help="只打印计划，不发网络请求、不写文件")
-@click.option("--include-missing", is_flag=True, default=False,
-              help="增量模式下也回补本地从未建成的表（全历史，极慢）")
-@click.option("--budget-seconds", type=float, default=None,
-              help="增量模式时间预算秒数（默认 780）；耗尽后剩余表标 DEFERRED(budget)")
-def sync_bulk(
-    mode: str,
-    tables: str,
-    topic: str,
-    end: str | None,
-    dry_run: bool,
-    include_missing: bool,
-    budget_seconds: float | None,
-) -> None:
-    """按 download_all_v2 的增量语义同步全量行情/财务表。
+    if sync_all:
+        wanted.extend(SP.all_table_names())
 
-    与 `sync` 并存是有意的：`sync` 走 zer0share.sync 的每日分区规范 + MetaStore 记账；
-    `sync-bulk` 走 download_all_v2 的单文件 + alt_paths + date=* 分区规范，
-    历史数据都按后者落盘，合并到前者会拆成两个文件。
+    if not wanted:
+        raise click.UsageError(
+            "需要指定 --table/--tables/--topic/--all "
+            "(或 --stock/--futures/--options/--etf/--ricequant)"
+        )
 
-    `--topic` 按主题批量选择表（对齐 `sync --stock/--futures` 的用法），
-    `--tables` 精确指定单表；两者可叠加，取并集。
-    """
-    argv: list[str] = ["--mode", mode]
-    if tables:
-        argv += ["--tables", tables]
-    if topic:
-        argv += ["--topic", topic]
-    if end:
-        argv += ["--end", end]
-    if dry_run:
-        argv.append("--dry-run")
-    if include_missing:
-        argv.append("--include-missing")
-    if budget_seconds is not None:
-        argv += ["--budget-seconds", str(budget_seconds)]
+    # 归一表名 + 去重
+    canonical: list[str] = []
+    for t in wanted:
+        name = SP.normalize_table(t)
+        if name not in canonical:
+            canonical.append(name)
 
-    from zer0share.bulk import main as bulk_main
+    unknown = [t for t in canonical if t not in SP.PLANS]
+    if unknown:
+        raise click.UsageError(
+            f"未知表: {','.join(unknown)}｜用 'zer0share sync --help' 查看主题清单"
+        )
 
-    code = bulk_main(argv)
-    if code:
-        raise click.exceptions.Exit(code)
+    cfg = load_config(Path("config/settings.toml"))
+    init_logger(cfg.log_path)
+
+    from zer0share.sync_runner import DateRangeNotSupported, run_sync
+
+    try:
+        report = run_sync(
+            cfg,
+            canonical,
+            start_date=start_date,
+            end_date=end_date,
+            dry_run=dry_run,
+            budget_seconds=budget_seconds,
+            include_missing=include_missing,
+            pipeline_factory=_make_pipeline,
+        )
+    except DateRangeNotSupported as exc:
+        raise click.UsageError(str(exc)) from exc
+    click.echo(f"sync 完成: {report.summary()}")
+    if report.failed:
+        raise click.exceptions.Exit(1)
 
 
 @cli.group()
