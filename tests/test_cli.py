@@ -487,6 +487,70 @@ def test_build_universe_rejects_date_with_range():
     assert "--date cannot be used with --start-date or --end-date" in result.output
 
 
+def test_sync_rejects_table_missing_from_registry():
+    """显式 --table 指定了 registry 里没有的表时必须报错。
+
+    回归用例: [ricequant] enabled=false 时 build_jobs 返回空, 旧实现只打印
+    "无注册项, 跳过" 并返回 exit 0, 让调用方以为同步成功了。
+    """
+    registry = [t for t in _job_tables() if not t.startswith("ricequant")]
+    pipeline = _mock_pipeline_for(registry)
+
+    result, _bulk_runner = _invoke_sync(
+        ["--table", "ricequant_basic", "--dry-run"], pipeline
+    )
+
+    assert result.exit_code != 0
+    assert "ricequant_basic" in result.output
+    assert "enabled" in result.output
+
+
+def test_sync_rejects_missing_registry_table_without_dry_run():
+    """真实执行路径同样要拦: 静默跳过会掩盖"一张表都没写"。"""
+    registry = [t for t in _job_tables() if not t.startswith("ricequant")]
+    pipeline = _mock_pipeline_for(registry)
+
+    result, _bulk_runner = _invoke_sync(["--table", "ricequant_basic"], pipeline)
+
+    assert result.exit_code != 0
+    assert "ricequant_basic" in result.output
+    pipeline.run.assert_not_called()
+
+
+def test_job_tables_skip_unregistered_when_not_strict(tmp_path):
+    """非 strict: registry 里没有的表被剔除, 返回空表清单而不报错。"""
+    from zer0share.config import load_config
+    from zer0share import sync_runner as SR
+
+    # 用真实 config: [ricequant] enabled=false, 轻量 registry 因此不含
+    # ricequant_* 表 —— 这正是要覆盖的场景。
+    cfg = load_config(Path("config/settings.toml"))
+    reg = SR._lightweight_registry(cfg)
+    assert "ricequant_basic" not in reg
+
+    present = sorted(reg)[0]
+    done, failed = SR.run_job_tables(
+        cfg, [present, "ricequant_basic"], dry_run=True, strict=False
+    )
+
+    assert done == [present]
+    assert failed == []
+
+
+def test_job_tables_raise_on_unregistered_when_strict(tmp_path):
+    """strict: registry 里没有的表必须抛 UnknownTable。"""
+    import pytest
+    from zer0share.config import load_config
+    from zer0share import sync_runner as SR
+
+    cfg = load_config(Path("config/settings.toml"))
+
+    with pytest.raises(SR.UnknownTable) as exc:
+        SR.run_job_tables(cfg, ["ricequant_basic"], dry_run=True, strict=True)
+
+    assert "enabled" in str(exc.value)
+
+
 def test_quality_check_full_requires_date_range():
     runner = CliRunner()
 

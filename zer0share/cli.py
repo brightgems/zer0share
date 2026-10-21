@@ -245,6 +245,13 @@ def sync(
             "(或 --stock/--futures/--options/--etf/--ricequant)"
         )
 
+    # 用户显式点名了表 → strict。批量展开 (--all/--topic/--stock...) → 非
+    # strict: 关掉的数据源 (config enabled=false) 只是跳过, 不该让整条命令
+    # 失败; 只有用户明确要某张表却拿不到时, 才是配置/拼写问题, 必须报错。
+    named_table = bool(tables or tables_csv.strip())
+    strict = named_table and not (sync_all or topics or
+                                  any(legacy_flags.values()))
+
     # 归一表名 + 去重
     canonical: list[str] = []
     for t in wanted:
@@ -261,7 +268,8 @@ def sync(
     cfg = load_config(Path("config/settings.toml"))
     init_logger(cfg.log_path)
 
-    from zer0share.sync_runner import DateRangeNotSupported, run_sync
+    from zer0share.sync_runner import (DateRangeNotSupported, UnknownTable,
+                                       run_sync)
 
     try:
         report = run_sync(
@@ -272,9 +280,10 @@ def sync(
             dry_run=dry_run,
             budget_seconds=budget_seconds,
             include_missing=include_missing,
+            strict=strict,
             pipeline_factory=_make_pipeline,
         )
-    except DateRangeNotSupported as exc:
+    except (DateRangeNotSupported, UnknownTable) as exc:
         raise click.UsageError(str(exc)) from exc
     click.echo(f"sync 完成: {report.summary()}")
     if report.failed:

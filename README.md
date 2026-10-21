@@ -94,19 +94,15 @@ print(pro.daily(ts_code='000001.SZ', start_date='20240101', end_date='20240131')
 
 同步顺序、逐表命令和定时调度部署见[同步指南](docs/SYNC_GUIDE.md)。
 
-## 增量刷新（scripts/download_all_v2.py）
-
-独立的 tushare 下载脚本，默认**增量刷新**：按每张表已覆盖的最后日期/最新预期季末只补缺口，原子写回（`.tmp` 再 `os.replace`）。
+## 增量刷新（`zer0share sync`）
 
 ```bash
 # 默认增量：只补今天之前的缺口
-python scripts/download_all_v2.py
+python -m zer0share sync --all
 # 只刷两张表到指定日期
-python scripts/download_all_v2.py --tables moneyflow,moneyflow_ind --end 20261016
+python -m zer0share sync --tables daily_kline,moneyflow --end-date 20261016
 # 只看计划，不联网、不写盘
-python scripts/download_all_v2.py --dry-run --tables daily,moneyflow,index_weight
-# 恢复原来的整表下载行为
-python scripts/download_all_v2.py --mode full
+python -m zer0share sync --dry-run --tables daily_kline,moneyflow,index_weight
 ```
 
 ## 本地查询 API

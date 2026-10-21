@@ -2,12 +2,12 @@
 sync_plan.py — 统一 `sync` 命令的表清单与引擎路由。
 
 背景: 历史上 `sync` (zer0share.sync, 每日分区 + MetaStore 记账) 与
-`sync-bulk` (zer0share.bulk, download_all_v2 的增量语义) 是两套并行命令,
+`sync-bulk` (zer0share.bulk, 原 download_all_v2 的增量语义) 是两套并行命令,
 表名不同 (bulk `daily` ↔ catalog `daily_kline`)、落盘规范不同 (单文件 vs
 date=* 分区), 造成同一份数据两个拷贝、query 读不到其中一份。
 
 现在两套都写 catalog 声明的规范布局 (catalog.parquet_pattern 是唯一权威),
-因此可以合并成**一个** `sync` 命令:
+因此合并成**一个** `sync` 命令:
   - 表名统一用 catalog 名字 (daily_kline / basic / …)
   - 每张表按能力路由到对应引擎:
       * ENGINE_BULK — bulk 引擎: 缺口检测 + 内存安全的原子合并, 适合

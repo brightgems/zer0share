@@ -1,4 +1,4 @@
-"""zer0share/bulk.py — scripts/download_all_v2.py 的包内化版本（2026-10-21 融合）。
+"""zer0share/bulk.py — 原 scripts/download_all_v2.py 的包内化版本（2026-10-21 融合）。
 
 原脚本是独立文件：自带 tushare 客户端、硬编码 TOKEN/HTTP_URL/输出路径、print 输出。
 融合进包后能力与增量语义一字不改，只把「硬编码常量」换成「可配置」：
@@ -1436,18 +1436,29 @@ def _fetch_repo_daily(end):
     return _PRO.repo_daily(ts_code="204001.SH", start_date=START, end_date=end)
 
 
-def build_tables(dirs, cfg=None) -> list[dict]:
-    """表注册表（与 scripts/download_all_v2.py 的 TABLES 逐字段等价）。
+def _build_table_specs(dirs, cfg=None) -> list[dict]:
+    """表注册表（表清单历史来源 scripts/download_all_v2.py，已删除）。
 
     路径由 data_dir 派生；原脚本硬编码的 TOKEN/HTTP_URL 不在此处，改由 make_pro() 从
     config/settings.toml 读取。
+
+    deprecated=True 的表默认排除: 它们与 job 引擎重复注册, 且 bulk 侧路径还是
+    旧单文件布局, 与 catalog 规范分区不一致。统一 sync 按 sync_plan.PLANS
+    路由到 job 引擎, 不会漏同步; 传 include_deprecated=True 可强制返回
+    (仅供一次性迁移/排查使用)。
     """
     OUTPUT, MACRO_OUTPUT, US_OUTPUT, INDEX_OUTPUT = (
         dirs["OUTPUT"], dirs["MACRO_OUTPUT"], dirs["US_OUTPUT"], dirs["INDEX_OUTPUT"])
     return [
+        # 以下 4 张表 bulk 与 job 引擎都有注册项, 统一 sync 按 PLANS 路由到
+        # job 引擎 (交易日历驱动 + MetaStore 记账)。bulk 侧的注册项是历史
+        # 遗留, 路径仍是旧单文件 (<name>.parquet), 与 catalog 规范分区不一致,
+        # 一旦被单独调用会写出第二份拷贝。标记 deprecated=True 让
+        # build_tables 默认排除, 只有显式传 include_deprecated=True 才返回。
         dict(name="stock_basic", title="[0] 获取股票列表", kind="legacy",
              path=f"{OUTPUT}/stock_basic.parquet", api="stock_basic",
-             fetch=_fetch_stock_basic),
+             fetch=_fetch_stock_basic, deprecated=True,
+             deprecated_reason="由 job 引擎 basic 负责, catalog 规范为 stock/basic/data.parquet"),
         _date("daily", "[1] daily (日线行情)", dirs=dirs, cfg=cfg),
         _date("weekly", "[2] weekly (周线)", dirs=dirs, cfg=cfg),
         _date("monthly", "[3] monthly (月线)", dirs=dirs, cfg=cfg),
@@ -1490,16 +1501,19 @@ def build_tables(dirs, cfg=None) -> list[dict]:
         _date("suspend_d", "[23] suspend_d (停复牌)", dirs=dirs, cfg=cfg),
         dict(name="index_daily", title="[24] index_daily (指数日线)", kind="code", api="index_daily",
              path=f"{INDEX_OUTPUT}/index_daily.parquet", alt_paths=[f"{OUTPUT}/index_daily.parquet"],
-             codes=INDEX_CODES, date_col="trade_date"),
+             codes=INDEX_CODES, date_col="trade_date", deprecated=True,
+             deprecated_reason="由 job 引擎 index_daily 负责, catalog 规范为 index/index_daily/date=*"),
         # index_weight 无 ts_code 列, 主键必须带上 index_code+con_code, 否则会被 (trade_date) 去重压成每天一行
         dict(name="index_weight", title="[25] index_weight (指数权重)", kind="date", api="index_weight",
              path=f"{INDEX_OUTPUT}/index_weight.parquet", alt_paths=[f"{OUTPUT}/index_weight.parquet"],
-             date_col="trade_date", key=["index_code", "con_code", "trade_date"]),
+             date_col="trade_date", key=["index_code", "con_code", "trade_date"], deprecated=True,
+             deprecated_reason="由 job 引擎 index_weight 负责, catalog 规范为 index/index_weight/index_code=*/date=*"),
         _date("index_dailybasic", "[26] index_dailybasic (指数每日指标)",
               path=f"{INDEX_OUTPUT}/index_dailybasic.parquet", optional=True, dirs=dirs, cfg=cfg),
         dict(name="sw_daily", title="[27] sw_daily (申万行业日线)", kind="code", api="sw_daily",
              path=f"{INDEX_OUTPUT}/sw_daily.parquet", alt_paths=[f"{OUTPUT}/sw_daily.parquet"],
-             codes=SW_CODES, date_col="trade_date"),
+             codes=SW_CODES, date_col="trade_date", deprecated=True,
+             deprecated_reason="由 job 引擎 sw_daily 负责, catalog 规范为 stock/industry/sw_daily/date=*"),
         dict(name="cb_basic", title="[28] cb_basic (可转债列表)", kind="legacy",
              path=f"{OUTPUT}/cb_basic.parquet", api="cb_basic", tolerant=True,
              fetch=_fetch_cb_basic),
@@ -1526,6 +1540,14 @@ def build_tables(dirs, cfg=None) -> list[dict]:
              path=f"{MACRO_OUTPUT}/repo_daily.parquet", api="repo_daily", tolerant=True,
              fetch=_fetch_repo_daily),
     ]
+
+
+def build_tables(dirs, cfg=None, *, include_deprecated: bool = False) -> list[dict]:
+    """build_tables 的公开入口: 组装注册表并按 deprecated 过滤。"""
+    tables = _build_table_specs(dirs, cfg)
+    if include_deprecated:
+        return tables
+    return [t for t in tables if not t.get("deprecated")]
 
 
 # ---------------------------------------------------------------- CLI 参数

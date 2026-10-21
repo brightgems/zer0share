@@ -48,7 +48,7 @@ def download_date(date_str, retries=3):
 
 def main():
     import tushare as ts
-    # Method that actually works (matching download_all.py)
+    # Method that actually works (与原 download_all.py 的取数方式一致)
     ts.set_token(TUSHARE_TOKEN)
     api = ts.pro_api(TUSHARE_TOKEN)
     api._DataApi__http_url = TUSHARE_URL
