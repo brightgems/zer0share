@@ -1,6 +1,7 @@
 from zer0share.catalog import (
     ADJ_FACTOR_SPEC, BASIC_SPEC, DAILY_BASIC_SPEC, DAILY_KLINE_SPEC,
     STK_LIMIT_SPEC, STOCK_ST_SPEC, SUSPEND_D_SPEC,
+    SHARE_FLOAT_SPEC, BLOCK_TRADE_SPEC, MARGIN_SPEC,
 )
 from zer0share.storage import DailyPartitionStore, SnapshotStore
 from zer0share.sync._jobs import DailySyncJob, SnapshotSyncJob, SyncJob
@@ -46,5 +47,23 @@ def build_jobs(cfg, fetcher) -> list[SyncJob]:
             table_name=STK_LIMIT_SPEC.name, spec=STK_LIMIT_SPEC,
             fetch=fetcher.fetch_stk_limit,
             store=DailyPartitionStore(d / "stock" / "stk_limit"),
+        ),
+        DailySyncJob(
+            table_name=SHARE_FLOAT_SPEC.name, spec=SHARE_FLOAT_SPEC,
+            fetch=fetcher.fetch_share_float,
+            store=DailyPartitionStore(d / "stock" / "share_float"),
+            write_empty=True,
+        ),
+        DailySyncJob(
+            table_name=BLOCK_TRADE_SPEC.name, spec=BLOCK_TRADE_SPEC,
+            fetch=fetcher.fetch_block_trade,
+            store=DailyPartitionStore(d / "stock" / "block_trade"),
+            write_empty=True,
+        ),
+        DailySyncJob(
+            table_name=MARGIN_SPEC.name, spec=MARGIN_SPEC,
+            fetch=fetcher.fetch_margin,
+            store=DailyPartitionStore(d / "stock" / "margin"),
+            write_empty=True,
         ),
     ]

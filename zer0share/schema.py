@@ -47,6 +47,25 @@ DAILY_BASIC_COLS = [
 STOCK_ST_COLS = ["ts_code", "name", "trade_date", "type", "type_name"]
 SUSPEND_D_COLS = ["ts_code", "trade_date", "suspend_timing", "suspend_type"]
 STK_LIMIT_COLS = ["trade_date", "ts_code", "pre_close", "up_limit", "down_limit"]
+
+# 限售股解禁 (share_float) — 按解禁日期查, 非按交易日
+SHARE_FLOAT_COLS = [
+    "ts_code", "float_date", "float_share", "float_type",
+    "hold_share", "rate", "ann_date",
+]
+
+# 大宗交易 (block_trade) — 按交易日查
+BLOCK_TRADE_COLS = [
+    "trade_date", "ts_code", "name", "price",
+    "vol", "amount", "buyer", "seller",
+    "type", "adj_price",
+]
+
+# 融资融券 (margin) — 按交易日查
+MARGIN_COLS = [
+    "trade_date", "exchange_id", "name",
+    "rzye", "rzmre", "rzche", "rqye", "rqmcl", "rqyl", "rzrqye",
+]
 INDEX_WEIGHT_COLS = ["index_code", "con_code", "trade_date", "weight"]
 INDEX_DAILY_COLS = [
     "ts_code", "trade_date", "open", "high", "low",

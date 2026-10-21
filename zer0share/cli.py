@@ -91,6 +91,9 @@ STOCK_TABLES = [
     "stock_st",
     "suspend_d",
     "stk_limit",
+    "share_float",
+    "block_trade",
+    "margin",
     "index_daily",
     "index_weight",
     "idx_anns",
@@ -173,6 +176,63 @@ def sync(
             pipeline.run(table, start_date=start_date, end_date=end_date)
         else:
             raise click.UsageError("需要指定 --table、--stock、--futures、--options、--etf、--ricequant 或 --all")
+
+
+@cli.command("sync-bulk")
+@click.option(
+    "--mode",
+    type=click.Choice(["incremental", "full"]),
+    default="incremental",
+    show_default=True,
+    help="incremental=按缺口增量刷新；full=原 download_all_v2 全量行为",
+)
+@click.option("--tables", default="", help="逗号分隔表名过滤，如 moneyflow,moneyflow_ind；留空=全部")
+@click.option("--topic", default="",
+              help="按主题下载，逗号分隔；all=全部主题。可选: quote,fundflow,toplist,finance,"
+                   "index,bond,fund,us,macro。与 --tables 同时给出时取并集")
+@click.option("--end", default=None, callback=_validate_date, help="截止日期 YYYYMMDD，默认 incremental=今天")
+@click.option("--dry-run", is_flag=True, default=False, help="只打印计划，不发网络请求、不写文件")
+@click.option("--include-missing", is_flag=True, default=False,
+              help="增量模式下也回补本地从未建成的表（全历史，极慢）")
+@click.option("--budget-seconds", type=float, default=None,
+              help="增量模式时间预算秒数（默认 780）；耗尽后剩余表标 DEFERRED(budget)")
+def sync_bulk(
+    mode: str,
+    tables: str,
+    topic: str,
+    end: str | None,
+    dry_run: bool,
+    include_missing: bool,
+    budget_seconds: float | None,
+) -> None:
+    """按 download_all_v2 的增量语义同步全量行情/财务表。
+
+    与 `sync` 并存是有意的：`sync` 走 zer0share.sync 的每日分区规范 + MetaStore 记账；
+    `sync-bulk` 走 download_all_v2 的单文件 + alt_paths + date=* 分区规范，
+    历史数据都按后者落盘，合并到前者会拆成两个文件。
+
+    `--topic` 按主题批量选择表（对齐 `sync --stock/--futures` 的用法），
+    `--tables` 精确指定单表；两者可叠加，取并集。
+    """
+    argv: list[str] = ["--mode", mode]
+    if tables:
+        argv += ["--tables", tables]
+    if topic:
+        argv += ["--topic", topic]
+    if end:
+        argv += ["--end", end]
+    if dry_run:
+        argv.append("--dry-run")
+    if include_missing:
+        argv.append("--include-missing")
+    if budget_seconds is not None:
+        argv += ["--budget-seconds", str(budget_seconds)]
+
+    from zer0share.bulk import main as bulk_main
+
+    code = bulk_main(argv)
+    if code:
+        raise click.exceptions.Exit(code)
 
 
 @cli.group()

@@ -18,6 +18,9 @@ dependencies = [
     "rqdatac>=3.0",
 ]
 
+[project.scripts]
+zer0share = "zer0share.cli:cli"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

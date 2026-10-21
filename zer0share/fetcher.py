@@ -37,6 +37,9 @@ from zer0share.schema import (
     STOCK_ST_COLS,
     STK_LIMIT_COLS,
     SUSPEND_D_COLS,
+    SHARE_FLOAT_COLS,
+    BLOCK_TRADE_COLS,
+    MARGIN_COLS,
     SW_CLASSIFY_COLS,
     SW_DAILY_COLS,
     SW_MEMBER_COLS,
@@ -141,6 +144,33 @@ class TushareFetcher:
         logger.debug(f"拉取每日涨跌停价格: {trade_date}")
         df = self._pro.stk_limit(trade_date=trade_date, fields=",".join(STK_LIMIT_COLS))
         return _select_columns_or_empty(df, STK_LIMIT_COLS)
+
+    def fetch_share_float(self, trade_date: str) -> pd.DataFrame:
+        """拉取限售股解禁 (按解禁日期查)"""
+        logger.debug(f"拉取限售股解禁: {trade_date}")
+        df = self._pro.share_float(
+            float_date=trade_date,
+            fields=",".join(SHARE_FLOAT_COLS),
+        )
+        return _select_columns_or_empty(df, SHARE_FLOAT_COLS)
+
+    def fetch_block_trade(self, trade_date: str) -> pd.DataFrame:
+        """拉取大宗交易 (按交易日查)"""
+        logger.debug(f"拉取大宗交易: {trade_date}")
+        df = self._pro.block_trade(
+            trade_date=trade_date,
+            fields=",".join(BLOCK_TRADE_COLS),
+        )
+        return _select_columns_or_empty(df, BLOCK_TRADE_COLS)
+
+    def fetch_margin(self, trade_date: str) -> pd.DataFrame:
+        """拉取融资融券 (按交易日查)"""
+        logger.debug(f"拉取融资融券: {trade_date}")
+        df = self._pro.margin(
+            trade_date=trade_date,
+            fields=",".join(MARGIN_COLS),
+        )
+        return _select_columns_or_empty(df, MARGIN_COLS)
 
     def fetch_index_weight(
         self, index_code: str, start_date: str, end_date: str

@@ -41,6 +41,9 @@ from zer0share.schema import (
     STOCK_ST_COLS,
     STK_LIMIT_COLS,
     SUSPEND_D_COLS,
+    SHARE_FLOAT_COLS,
+    BLOCK_TRADE_COLS,
+    MARGIN_COLS,
     SW_CLASSIFY_COLS,
     SW_DAILY_COLS,
     SW_MEMBER_COLS,
@@ -129,6 +132,44 @@ STK_LIMIT_SPEC = DailyTableSpec(
     hive_partitioning=True,
     union_by_name=True,
     first_date="20070104",
+)
+
+SHARE_FLOAT_SPEC = DailyTableSpec(
+    name="share_float",
+    path_parts=("stock", "share_float"),
+    columns=SHARE_FLOAT_COLS,
+    parquet_pattern="date=*/data.parquet",
+    sync_table="share_float",
+    order_by="ts_code, float_date",
+    hive_partitioning=True,
+    union_by_name=True,
+    first_date="20100101",
+    date_column="float_date",
+)
+
+BLOCK_TRADE_SPEC = DailyTableSpec(
+    name="block_trade",
+    path_parts=("stock", "block_trade"),
+    columns=BLOCK_TRADE_COLS,
+    parquet_pattern="date=*/data.parquet",
+    sync_table="block_trade",
+    order_by="ts_code, trade_date",
+    hive_partitioning=True,
+    union_by_name=True,
+    first_date="20100101",
+)
+
+MARGIN_SPEC = DailyTableSpec(
+    name="margin",
+    path_parts=("stock", "margin"),
+    columns=MARGIN_COLS,
+    parquet_pattern="date=*/data.parquet",
+    sync_table="margin",
+    order_by="trade_date, exchange_id",
+    hive_partitioning=True,
+    union_by_name=True,
+    first_date="20100331",
+    code_column=None,
 )
 
 INDEX_DAILY_SPEC = DailyTableSpec(

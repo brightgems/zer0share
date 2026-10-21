@@ -30,6 +30,40 @@ uv run python main.py sync --options  # 期权
 
 也可以逐表执行（顺序不可颠倒）。首次同步日线等历史数据量较大，受 Tushare 每分钟调用频次限制影响，全量回填可能需要数小时。
 
+### 批量增量刷新 `sync-bulk`（下载脚本已融合进包）
+
+`scripts/download_all_v2.py` 的增量语义已包内化为 `zer0share/bulk.py`，并注册为 CLI 子命令 `sync-bulk`：
+
+```bash
+zer0share sync-bulk                                   # 增量刷新全部 39 张表（默认预算 780s）
+zer0share sync-bulk --dry-run                         # 只打印计划：已覆盖到哪天 + 将下载哪些区间，不联网不写盘
+zer0share sync-bulk --tables daily,daily_basic        # 只刷指定表
+zer0share sync-bulk --end 20261031                    # 指定截止日
+zer0share sync-bulk --mode full                       # 原 download_all_v2 全量行为
+zer0share sync-bulk --include-missing                 # 也回补本地从未建成的表（全历史，极慢）
+zer0share sync-bulk --budget-seconds 3600             # 调整时间预算
+```
+
+安装后即有命令（`[project.scripts] zer0share = "zer0share.cli:cli"`，已 `pip install -e .`）：
+
+```bash
+uv run python -m zer0share.bulk --dry-run   # 等价入口（不走 click）
+```
+
+与 `sync` 并存是有意的：`sync` 走每日分区规范 + MetaStore 记账；`sync-bulk` 走单文件 +
+`alt_paths` + `date=*` 分区规范，历史数据都按后者落盘，合并到前者会拆成两个文件。
+
+工程约束（踩坑换来的，勿简化）：
+
+- 覆盖情况只读 parquet footer 统计 + 尾部 row group，绝不整表 pandas 读入
+  （`daily_basic` 8.07M×18 整表读入实测 2.98GB RSS，顶爆 cron cgroup 预算）
+- 单文件合并走 pyarrow 按 row group 流式读写 + 原子替换，内存只跟单个 row group 成正比
+- 沿用旧文件压缩算法（`daily_basic` 原是 polars zstd，改 snappy 文件涨 53%；zstd 显式 level 3）
+- 从未建成的表默认不发请求（否则每晚从零回补 1645 个交易日 → 3600s 窗口必超时）；
+  `--include-missing` 可显式开启
+- 预算耗尽后剩余表标 `DEFERRED(budget)`，exit code 仍按核心表（daily/daily_basic/adj_factor/
+  stk_limit/suspend_d/index_daily/index_weight）覆盖判定：齐全 0，有缺口 3
+
 ### 股票核心（必选）
 
 ```bash
