@@ -9,7 +9,20 @@ from zer0share.trading_calendar import TradingCalendar
 
 class Pipeline:
     def __init__(self, cfg: Config, sources: DataSources, notifier: Notifier):
-        meta = MetaStore(cfg.db_path)
+        try:
+            meta = MetaStore(cfg.db_path)
+        except Exception as exc:  # noqa: BLE001
+            # DuckDB 单写锁: 同时跑两个 sync 进程时第二个在这里炸,
+            # 裸 traceback 很难看出"是别的 sync 还在跑"
+            msg = str(exc)
+            if "lock" in msg.lower() or "Conflicting" in msg:
+                raise RuntimeError(
+                    f"MetaStore 数据库被占用 ({cfg.db_path})。\n"
+                    "另一个 sync 进程正在运行 —— DuckDB 只允许单写连接。\n"
+                    "请等它结束, 或用 `ps -eo pid,cmd | grep zer0share` 找到并"
+                    "结束旧进程后重试。"
+                ) from exc
+            raise
         calendar = TradingCalendar(meta)
         self._runtime = SyncRuntime(calendar=calendar, notifier=notifier, meta=meta)
         self._registry: dict[str, SyncJob] = {}

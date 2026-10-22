@@ -41,6 +41,7 @@ from zer0share.sync._jobs import SyncJob, PROGRESS_INTERVAL
 # 50 天 ≈ shibor 100 秒, 中断最多损失一批。
 BATCH_FLUSH_DAYS = 50
 BATCH_FLUSH_ROWS = 500_000
+HEARTBEAT_SECONDS = 300.0  # 长跑心跳间隔, 避免 50 天窗口内静默像卡死
 
 PAGE_SIZE = 5000        # Tushare 单次上限
 MAX_PAGES = 200         # 单日翻页硬上限 (防死循环)
@@ -224,6 +225,7 @@ class BatchSyncJob(SyncJob):
         pending_days: list[str] = []
         written_days, written_rows = 0, 0
         started = time.monotonic()
+        last_beat = started
         for i, d in enumerate(dates):
             df, err = _fetch_paged(
                 self._pro, self.api_name, {self.date_col: d, **self.extra_params},
@@ -254,6 +256,14 @@ class BatchSyncJob(SyncJob):
                     f"落盘 {written_days} 天, {i + 1}/{len(dates)}, "
                     f"{time.monotonic() - started:.0f}s)"
                 )
+                last_beat = time.monotonic()
+            elif time.monotonic() - last_beat >= HEARTBEAT_SECONDS:
+                # 长历史回溯时 50 天可能要几分钟, 加时间心跳避免看起来卡死
+                logger.info(
+                    f"{self.table_name}: ...{d} (进行中, {i + 1}/{len(dates)} 天, "
+                    f"落盘 {written_days} 天, {time.monotonic() - started:.0f}s)"
+                )
+                last_beat = time.monotonic()
         summary = ""
         if errs:
             detail = ", ".join(f"{k} x{v}" for k, v in sorted(errs.items(), key=lambda kv: -kv[1]))
