@@ -6,6 +6,7 @@ from zer0share.catalog import (
     DAILY_BASIC_SPEC,
     DAILY_KLINE_SPEC,
     STOCK_ST_SPEC,
+    STK_HOLDERTRADE_SPEC,
     STK_LIMIT_SPEC,
     SUSPEND_D_SPEC,
 )
@@ -95,6 +96,21 @@ def suspend_d(ctx: QueryContext, ts_code=None, trade_date=None,
     """Query daily suspension records (stock halted from trading)."""
     return _daily_repo(ctx, SUSPEND_D_SPEC).query(
         ts_code, trade_date, start_date, end_date, fields, limit=limit, offset=offset
+    )
+
+
+def stk_holdertrade(ctx: QueryContext, ts_code=None, ann_date=None,
+                    start_date=None, end_date=None, holder_type=None, trade_type=None,
+                    fields=None, limit: int | None = None, offset: int | None = None) -> pd.DataFrame:
+    """Query shareholder increase/decrease announcements (holder_type C/P/G, trade_type IN/DE)."""
+    filters: list[SqlFilter] = []
+    if holder_type is not None:
+        filters.append(eq_filter("holder_type", holder_type, STK_HOLDERTRADE_SPEC.columns))
+    if trade_type is not None:
+        filters.append(eq_filter("in_de", trade_type, STK_HOLDERTRADE_SPEC.columns))
+    return _daily_repo(ctx, STK_HOLDERTRADE_SPEC).query(
+        ts_code, ann_date, start_date, end_date, fields,
+        filters=filters, limit=limit, offset=offset,
     )
 
 

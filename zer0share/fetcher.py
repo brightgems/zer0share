@@ -35,6 +35,7 @@ from zer0share.schema import (
     OPT_BASIC_COLS,
     OPT_DAILY_COLS,
     STOCK_ST_COLS,
+    STK_HOLDERTRADE_COLS,
     STK_LIMIT_COLS,
     SUSPEND_D_COLS,
     SW_CLASSIFY_COLS,
@@ -163,6 +164,30 @@ class TushareFetcher:
             fields=",".join(INDEX_DAILY_COLS),
         )
         return _select_columns_or_empty(df, INDEX_DAILY_COLS)
+
+    def fetch_stk_holdertrade(self, ann_date: str) -> pd.DataFrame:
+        """按公告日拉股东增减持。接口会把同一条记录原样返回多次，这里去掉完全重复的行。"""
+        logger.debug(f"拉取股东增减持: {ann_date}")
+        frames = []
+        limit = 3000
+        offset = 0
+        while True:
+            df = self._pro.stk_holdertrade(
+                ann_date=ann_date,
+                fields=",".join(STK_HOLDERTRADE_COLS),
+                limit=limit,
+                offset=offset,
+            )
+            if df is None or df.empty:
+                break
+            frames.append(df)
+            if len(df) < limit:
+                break
+            offset += limit
+        if not frames:
+            return pd.DataFrame(columns=STK_HOLDERTRADE_COLS)
+        combined = pd.concat(frames, ignore_index=True)[STK_HOLDERTRADE_COLS]
+        return combined.drop_duplicates(ignore_index=True)
 
     def fetch_idx_anns(self, ann_date: str) -> pd.DataFrame:
         logger.debug(f"拉取指数公告: {ann_date}")

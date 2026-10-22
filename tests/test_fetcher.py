@@ -1646,3 +1646,46 @@ def test_fetch_opt_daily_calls_api_with_date(mock_pro):
             exchange=exchange,
             fields=",".join(OPT_DAILY_COLS),
         )
+
+
+STK_HOLDERTRADE_COLS = [
+    "ts_code", "ann_date", "holder_name", "holder_type", "in_de",
+    "change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "total_share",
+]
+
+
+def _holdertrade_row(*, ts_code="600519.SH", holder_name="中国贵州茅台酒厂(集团)有限责任公司", in_de="IN"):
+    return {
+        "ts_code": ts_code, "ann_date": "20251230", "holder_name": holder_name,
+        "holder_type": "C", "in_de": in_de, "change_vol": 2003538.0, "change_ratio": 0.16,
+        "after_share": 681282935.0, "after_ratio": 54.4038, "avg_price": None, "total_share": 681282935.0,
+    }
+
+
+def test_fetch_stk_holdertrade_paginates_and_drops_exact_duplicates(mock_pro):
+    first_page = pd.DataFrame(
+        [_holdertrade_row(ts_code=f"{i:06d}.SZ") for i in range(2999)] + [_holdertrade_row()]
+    )
+    # Tushare 会把同一条记录原样返回多次（茅台 20251230 返回 3 行一模一样的）
+    second_page = pd.DataFrame([_holdertrade_row(), _holdertrade_row(in_de="DE")])
+    mock_pro.stk_holdertrade.side_effect = [first_page, second_page]
+    fetcher = TushareFetcher("fake_token")
+
+    df = fetcher.fetch_stk_holdertrade("20251230")
+
+    assert list(df.columns) == STK_HOLDERTRADE_COLS
+    assert len(df) == 3001
+    assert mock_pro.stk_holdertrade.call_args_list == [
+        call(ann_date="20251230", fields=",".join(STK_HOLDERTRADE_COLS), limit=3000, offset=0),
+        call(ann_date="20251230", fields=",".join(STK_HOLDERTRADE_COLS), limit=3000, offset=3000),
+    ]
+
+
+def test_fetch_stk_holdertrade_returns_empty_when_none(mock_pro):
+    mock_pro.stk_holdertrade.return_value = None
+    fetcher = TushareFetcher("fake_token")
+
+    df = fetcher.fetch_stk_holdertrade("20251230")
+
+    assert df.empty
+    assert list(df.columns) == STK_HOLDERTRADE_COLS

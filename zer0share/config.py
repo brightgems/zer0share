@@ -51,6 +51,16 @@ class RiceQuantConfig:
 
 
 @dataclass(frozen=True)
+class NewsConfig:
+    """新闻接口可以用另一个 Tushare 账号（需要单独开通新闻权限）；未配置时沿用主账号。"""
+
+    token: str
+    http_url: str
+    request_sleep_seconds: float
+    with_content: bool  # major_news 是否存正文（整页 HTML，体积大）
+
+
+@dataclass(frozen=True)
 class QualityConfig:
     enabled: bool
     mode: str
@@ -70,6 +80,17 @@ class Config:
     notifier: NotifierConfig
     ricequant: RiceQuantConfig
     quality: QualityConfig
+    news: NewsConfig
+
+
+def _parse_news(raw: dict) -> NewsConfig:
+    raw_news = raw.get("tushare_news", {})
+    return NewsConfig(
+        token=str(raw_news.get("token") or raw["tushare"]["token"]),
+        http_url=str(raw_news.get("http_url", "http://api.tushare.pro")),
+        request_sleep_seconds=float(raw_news.get("request_sleep_seconds", 0.5)),
+        with_content=bool(raw_news.get("with_content", False)),
+    )
 
 
 def _parse_ricequant(raw: dict) -> RiceQuantConfig:
@@ -190,6 +211,7 @@ def load_config(path: Path = Path("config/settings.toml")) -> Config:
             notifier=notifier,
             ricequant=_parse_ricequant(raw),
             quality=_parse_quality(raw.get("quality")),
+            news=_parse_news(raw),
         )
     except KeyError as e:
         raise KeyError(f"配置文件缺少必要字段: {e}") from e

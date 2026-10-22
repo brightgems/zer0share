@@ -4,6 +4,7 @@ from pathlib import Path
 from zer0share.config import load_config
 from zer0share.query import QueryContext
 from zer0share.query import calendar, stock, index, industry, futures, options, etf
+from zer0share.query import news as news_query
 
 
 def _check_dates(kwargs: dict) -> None:
@@ -49,6 +50,10 @@ class LocalPro:
         _check_dates(kwargs)
         return stock.suspend_d(self._ctx, **kwargs)
 
+    def stk_holdertrade(self, **kwargs):
+        _check_dates(kwargs)
+        return stock.stk_holdertrade(self._ctx, **kwargs)
+
     def stk_limit(self, **kwargs):
         _check_dates(kwargs)
         return stock.stk_limit(self._ctx, **kwargs)
@@ -68,6 +73,15 @@ class LocalPro:
     def idx_anns(self, **kwargs):
         _check_dates(kwargs)
         return index.idx_anns(self._ctx, **kwargs)
+
+    # News（SQLite 主库，见 zer0share/news）
+    def major_news(self, **kwargs):
+        _check_dates(kwargs)
+        return news_query.major_news(self._ctx, **kwargs)
+
+    def news(self, **kwargs):
+        _check_dates(kwargs)
+        return news_query.news(self._ctx, **kwargs)
 
     def universe(self, **kwargs):
         _check_dates(kwargs)
@@ -174,10 +188,13 @@ class LocalPro:
             "stock_st": self.stock_st,
             "suspend_d": self.suspend_d,
             "stk_limit": self.stk_limit,
+            "stk_holdertrade": self.stk_holdertrade,
             "index_daily": self.index_daily,
             "index_weight": self.index_weight,
             "sw_daily": self.sw_daily,
             "idx_anns": self.idx_anns,
+            "major_news": self.major_news,
+            "news": self.news,
             "universe": self.universe,
             "pro_bar": self.pro_bar,
             "index_classify": self.index_classify,

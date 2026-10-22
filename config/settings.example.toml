@@ -1,6 +1,14 @@
 [tushare]
 token = "your_tushare_token_here"
 
+# 可选：新闻接口（major_news / news）需要单独开通权限，可以用另一个账号。
+# 整节不写时沿用 [tushare] 的 token。
+[tushare_news]
+token = ""                          # 留空则沿用主账号
+http_url = "http://api.tushare.pro"
+request_sleep_seconds = 0.5         # 每次请求后的间隔
+with_content = false                # major_news 是否存正文（整页 HTML，体积大）
+
 [paths]
 data_dir = "data"
 db_path = "db/meta.duckdb"

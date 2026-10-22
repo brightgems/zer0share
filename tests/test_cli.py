@@ -705,3 +705,15 @@ def test_sync_etf_index_rejects_date_range():
 
     assert result.exit_code != 0
     assert "date range options" in result.output
+
+
+def test_sync_stock_includes_stk_holdertrade():
+    runner = CliRunner()
+    pipeline = _make_mock_pipeline()
+
+    with patch("zer0share.cli._make_pipeline", return_value=pipeline):
+        result = runner.invoke(cli, ["sync", "--stock"])
+
+    assert result.exit_code == 0
+    called_tables = [args.args[0] for args in pipeline.run.call_args_list]
+    assert "stk_holdertrade" in called_tables

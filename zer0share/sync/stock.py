@@ -1,9 +1,9 @@
 from zer0share.catalog import (
     ADJ_FACTOR_SPEC, BASIC_SPEC, DAILY_BASIC_SPEC, DAILY_KLINE_SPEC,
-    STK_LIMIT_SPEC, STOCK_ST_SPEC, SUSPEND_D_SPEC,
+    STK_HOLDERTRADE_SPEC, STK_LIMIT_SPEC, STOCK_ST_SPEC, SUSPEND_D_SPEC,
 )
 from zer0share.storage import DailyPartitionStore, SnapshotStore
-from zer0share.sync._jobs import DailySyncJob, SnapshotSyncJob, SyncJob
+from zer0share.sync._jobs import CalendarDateSyncJob, DailySyncJob, SnapshotSyncJob, SyncJob
 
 
 def build_jobs(cfg, fetcher) -> list[SyncJob]:
@@ -46,5 +46,12 @@ def build_jobs(cfg, fetcher) -> list[SyncJob]:
             table_name=STK_LIMIT_SPEC.name, spec=STK_LIMIT_SPEC,
             fetch=fetcher.fetch_stk_limit,
             store=DailyPartitionStore(d / "stock" / "stk_limit"),
+        ),
+        # 公告日含周末，按自然日逐日拉
+        CalendarDateSyncJob(
+            table_name=STK_HOLDERTRADE_SPEC.name, spec=STK_HOLDERTRADE_SPEC,
+            fetch=fetcher.fetch_stk_holdertrade,
+            store=DailyPartitionStore(d / "stock" / "stk_holdertrade"),
+            write_empty=True,
         ),
     ]

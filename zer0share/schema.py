@@ -47,6 +47,10 @@ DAILY_BASIC_COLS = [
 STOCK_ST_COLS = ["ts_code", "name", "trade_date", "type", "type_name"]
 SUSPEND_D_COLS = ["ts_code", "trade_date", "suspend_timing", "suspend_type"]
 STK_LIMIT_COLS = ["trade_date", "ts_code", "pre_close", "up_limit", "down_limit"]
+STK_HOLDERTRADE_COLS = [
+    "ts_code", "ann_date", "holder_name", "holder_type", "in_de",
+    "change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "total_share",
+]
 INDEX_WEIGHT_COLS = ["index_code", "con_code", "trade_date", "weight"]
 INDEX_DAILY_COLS = [
     "ts_code", "trade_date", "open", "high", "low",

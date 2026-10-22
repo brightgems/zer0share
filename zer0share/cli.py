@@ -5,6 +5,7 @@ import click
 
 from zer0share.config import load_config
 from zer0share.logging import init_logger
+from zer0share.news import NEWS_APIS, NEWS_DB, NEWS_RAW, NewsStore, NewsSyncer, RawArchive, TushareHttpClient
 from zer0share.notifier import build_notifier
 from zer0share.pipeline import Pipeline
 from zer0share.quality.models import QualityRunOptions
@@ -91,6 +92,7 @@ STOCK_TABLES = [
     "stock_st",
     "suspend_d",
     "stk_limit",
+    "stk_holdertrade",
     "index_daily",
     "index_weight",
     "idx_anns",
@@ -267,6 +269,54 @@ def build_universe_cmd(
     )
     for name, count in summary["counts"].items():
         click.echo(f"{name}: {count}")
+
+
+@cli.group("news")
+def news_group():
+    """新闻数据（原始 JSONL 归档 + SQLite 主库）。"""
+
+
+@news_group.command("sync")
+@click.option("--api", "api_name", type=click.Choice(sorted(NEWS_APIS)), default="major_news")
+@click.option("--src", "sources", multiple=True, help="只同步指定来源，可重复；默认全部来源")
+@click.option("--start-date", required=True, callback=_validate_date)
+@click.option("--end-date", default=None, callback=_validate_date, help="默认今天")
+@click.option("--with-content/--no-content", default=None, help="是否存正文；默认取配置 tushare_news.with_content")
+@click.option("--refresh", is_flag=True, default=False, help="忽略断点，重拉已完成的日期")
+def news_sync(
+    api_name: str,
+    sources: tuple[str, ...],
+    start_date: str,
+    end_date: str | None,
+    with_content: bool | None,
+    refresh: bool,
+) -> None:
+    """同步新闻：python main.py news sync --api major_news --start-date 20250324"""
+    spec = NEWS_APIS[api_name]
+    unknown = set(sources) - set(spec.sources)
+    if unknown:
+        raise click.UsageError(f"{api_name} 不支持的来源：{', '.join(unknown)}；可选：{', '.join(spec.sources)}")
+    end_date = end_date or dt.date.today().strftime("%Y%m%d")
+    if end_date < start_date:
+        raise click.UsageError("--end-date must be on or after --start-date")
+
+    cfg = load_config(Path("config/settings.toml"))
+    init_logger(cfg.log_path)
+    client = TushareHttpClient(cfg.news.token, cfg.news.http_url, cfg.news.request_sleep_seconds)
+    store = NewsStore(cfg.data_dir.joinpath(*NEWS_DB))
+    try:
+        summary = NewsSyncer(client, store, RawArchive(cfg.data_dir.joinpath(*NEWS_RAW))).sync(
+            spec,
+            start_date,
+            end_date,
+            sources=list(sources) or None,
+            with_content=cfg.news.with_content if with_content is None else with_content,
+            refresh=refresh,
+        )
+    finally:
+        client.close()
+        store.close()
+    click.echo(f"{api_name}：{summary}")
 
 
 @cli.command()
