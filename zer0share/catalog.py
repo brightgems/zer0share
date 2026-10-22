@@ -1094,8 +1094,9 @@ SHIBOR_SPEC = DailyTableSpec(
     hive_partitioning=True,
     union_by_name=True,
     sync_table="shibor",
-    order_by="trade_date",
-    date_column="trade_date",
+    # shibor 接口的日期列叫 date, 不是 trade_date (实测列名 date/on/1w/2w/...)
+    order_by="date",
+    date_column="date",
     first_date="20061001",
 )
 
@@ -1113,8 +1114,10 @@ REPURCHASE_SPEC = DailyTableSpec(
     hive_partitioning=True,
     union_by_name=True,
     sync_table="repurchase",
-    order_by="trade_date",
-    date_column="trade_date",
+    # 逆回购公告无交易日列: 接口只认 start_date/end_date 窗口, 返回
+    # ann_date/end_date 公告与到期日。分区键取 ann_date。
+    order_by="ann_date",
+    date_column="ann_date",
     first_date="20070101",
 )
 

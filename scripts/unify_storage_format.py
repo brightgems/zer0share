@@ -7,14 +7,17 @@ catalog 是唯一权威:
   - index_weight  index_code=*/date=*/data.parquet
   - trade_cal     exchange=*/data.parquet
 
-现状 (改前):
-  ① 单文件  <name>.parquet          —— sync-bulk 写, 最新 (到 20261020/21)
+现状 (改前, 2026-10-21 迁移时的历史快照, 现已完成):
+  ① 单文件  <name>.parquet          —— 原 bulk 引擎写, 最新 (到 20261020/21)
   ② date=*  分区 <name>/            —— sync 遗留, 停更 (到 20260930 或更早)
   ③ dt=*    分区                     —— block_trade/share_float (已 rename 成 date=*)
   ④ exchange=* / index_code=*        —— trade_cal / index_weight (本就是规范, 不动)
 
 合并方向 = 分区保留历史 + 单文件补分区没有的日期 (分区历史更长, 单文件更新)。
 重复拷贝移 <name>.parquet.trash-<ts>/ , 一周验证后由 --purge-trash 真正删除。
+
+注: bulk 引擎已删除 (能力吸收进 BatchSyncJob), 本脚本仅用于历史数据迁移,
+新数据不会再产生单文件路径。
 """
 from __future__ import annotations
 

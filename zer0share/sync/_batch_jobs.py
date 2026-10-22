@@ -34,7 +34,6 @@ from zer0share.storage import DailyPartitionStore, SnapshotStore
 # kind: date=按交易日批量 / stock=逐只 / quarter=按季末 / snapshot=一次性快照
 BATCH_TABLES: dict[str, tuple[str, dict, str]] = {
     # ---- 按日批量 (date=*) ----
-    "monthly":          ("date", {}, "trade_date"),
     "moneyflow":        ("date", {}, "trade_date"),
     "margin_detail":    ("date", {}, "trade_date"),
     "hk_hold":          ("date", {}, "trade_date"),
@@ -42,10 +41,16 @@ BATCH_TABLES: dict[str, tuple[str, dict, str]] = {
     "top_inst":         ("date", {}, "trade_date"),
     "index_dailybasic": ("date", {}, "trade_date"),
     "cb_daily":         ("date", {}, "trade_date"),
-    "shibor":           ("date", {}, "trade_date"),
-    "repurchase":       ("date", {}, "trade_date"),
-    # ---- 逐只查 (财报类 / weekly) ----
+    # shibor 的日期列叫 date (不是 trade_date) — 实测列名 ['date','on','1w',...]
+    "shibor":           ("date", {}, "date"),
+    # 逆回购公告: 无交易日维度, 接口只认 start_date/end_date 窗口, 返回
+    # ann_date/end_date。分区键取 ann_date (见 REPURCHASE_SPEC)
+    "repurchase":       ("window", {}, "ann_date"),
+    # ---- 逐只查 (财报类 / weekly / monthly) ----
+    # monthly 实测 trade_date 参数被拒 ('ts_code,trade_date 至少输入一个'),
+    # 与 weekly 同为 ts_code+start_date/end_date 逐只查
     "weekly":            ("stock", {}, "trade_date"),
+    "monthly":           ("stock", {}, "trade_date"),
     "income":            ("stock", {}, "end_date"),
     "balancesheet":      ("stock", {}, "end_date"),
     "cashflow":          ("stock", {}, "end_date"),

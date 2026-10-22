@@ -35,6 +35,13 @@ from zer0share.storage import DailyPartitionStore, SnapshotStore
 from zer0share.sync import SyncRuntime
 from zer0share.sync._jobs import SyncJob, PROGRESS_INTERVAL
 
+# 流式落盘阈值: 每攒够这么多天/行就 merge 一次, 避免长历史回溯
+# (数千天) 时一次中断丢光全部进度。trade_cal 实测单日约 20 行,
+# moneyflow 单日约 5575 行 —— 取行阈值兜住「天少但行多」的表。
+# 50 天 ≈ shibor 100 秒, 中断最多损失一批。
+BATCH_FLUSH_DAYS = 50
+BATCH_FLUSH_ROWS = 500_000
+
 PAGE_SIZE = 5000        # Tushare 单次上限
 MAX_PAGES = 200         # 单日翻页硬上限 (防死循环)
 RETRY_DELAYS = (5, 15, 45)
@@ -204,9 +211,18 @@ class BatchSyncJob(SyncJob):
         self._trading_days_from = trading_days_from
 
     # ---- 取数 ------------------------------------------------------------
-    def _fetch_dates(self, dates: list[str]):
-        """按日期批量拉取, 返回 (df, err_summary)。"""
+    def _fetch_dates(self, dates: list[str], rt: "SyncRuntime | None" = None):
+        """按日期批量拉取。
+
+        流式分批落盘: 每 BATCH_FLUSH_DAYS 天 (或累计 BATCH_FLUSH_ROWS 行)
+        就 merge 一次, 中断最多丢当前批次而非全部进度 —— 长历史回溯
+        (数千天) 时这是必需的, 否则一次 kill 就前功尽弃。
+        返回 (df | None, err_summary); df 非 None 时表示最后一批待写。
+        """
         all_dfs, errs, empty = [], {}, 0
+        pending: list = []          # 未落盘的 DataFrame
+        pending_days: list[str] = []
+        written_days, written_rows = 0, 0
         started = time.monotonic()
         for i, d in enumerate(dates):
             df, err = _fetch_paged(
@@ -216,28 +232,54 @@ class BatchSyncJob(SyncJob):
             if err is not None:
                 errs[_err_key(err)] = errs.get(_err_key(err), 0) + 1
             elif df is not None and len(df) > 0:
-                all_dfs.append(df)
+                pending.append(df)
+                pending_days.append(d)
             else:
                 empty += 1
+                pending_days.append(d)
             time.sleep(self.sleep)
+            _flush_ok = (
+                len(pending_days) >= BATCH_FLUSH_DAYS
+                or sum(len(x) for x in pending) >= BATCH_FLUSH_ROWS
+            )
+            if _flush_ok and pending and rt is not None and self.store is not None:
+                written_days += self._flush(pending, pending_days, rt)
+                written_rows += sum(len(x) for x in pending)
+                all_dfs.extend(pending)
+                pending, pending_days = [], []
             if (i + 1) % PROGRESS_INTERVAL == 0:
-                total = sum(len(x) for x in all_dfs)
-                logger.info(f"{self.table_name}: ...{d} ({total:,} rows, {i + 1}/{len(dates)})")
+                total = written_rows + sum(len(x) for x in pending)
+                logger.info(
+                    f"{self.table_name}: ...{d} ({total:,} rows, "
+                    f"落盘 {written_days} 天, {i + 1}/{len(dates)}, "
+                    f"{time.monotonic() - started:.0f}s)"
+                )
         summary = ""
         if errs:
             detail = ", ".join(f"{k} x{v}" for k, v in sorted(errs.items(), key=lambda kv: -kv[1]))
             summary = f"{sum(errs.values())}/{len(dates)} 天接口报错: {detail}"
-        if not all_dfs:
+        if not all_dfs and not pending:
             return None, summary or (
                 f"接口全部返回空 ({empty}/{len(dates)} 天, 数据可能尚未发布)" if empty else "无日期需要下载"
             )
         if summary:
-            summary += f"; 其余 {len(all_dfs)} 天成功"
+            summary += f"; 其余 {written_days + len(pending)} 天成功"
         logger.info(
-            f"{self.table_name}: 取数完成 {len(all_dfs)}/{len(dates)} 天 "
-            f"{sum(len(x) for x in all_dfs):,} 行, 耗时 {time.monotonic() - started:.0f}s"
+            f"{self.table_name}: 取数完成 落盘 {written_days} 天 + 待写 {len(pending)} 天, "
+            f"累计 {written_rows + sum(len(x) for x in pending):,} 行, "
+            f"耗时 {time.monotonic() - started:.0f}s"
         )
-        return pd.concat(all_dfs, ignore_index=True), summary
+        return pending, summary
+
+    def _flush(self, dfs: list, days: list[str], rt: "SyncRuntime") -> int:
+        """把一批 DataFrame 合并写入分区, 返回实际落盘天数。"""
+        import pandas as pd
+        merged = clean_df(pd.concat(dfs, ignore_index=True))
+        wrote = self.store.merge(merged, date_col=self.date_col, name=self.spec.name)
+        if rt.meta is not None and days:
+            rt.meta.update_last_date(self.spec.name, max(days))
+        logger.info(f"{self.table_name}: 落盘 {wrote} 个分区 ({len(days)} 天请求)")
+        return len(days)
 
     def _fetch_codes(self, codes: list[str], start: str, end: str):
         """按股票批量拉取 (财报类表: 每只一次请求, 带 start/end 窗口)。"""
@@ -291,12 +333,40 @@ class BatchSyncJob(SyncJob):
             return None, f"季度接口全部返回空: {detail}" if detail else "无季度需要下载"
         return pd.concat(all_dfs, ignore_index=True), ""
 
+    # ---- window: 一次请求拿整段时间窗 (无交易日维度的公告类接口) -------
+    def _run_window(self, rt: SyncRuntime, start_date: str | None,
+                    end_date: str | None) -> None:
+        started = time.monotonic()
+        last = rt.meta.get_last_date(self.spec.name)
+        start = start_date or (dateutil.add_days(last, 1) if last is not None else self.spec.first_date)
+        end = end_date or rt.calendar.today()
+        if start > end:
+            logger.info(f"{self.table_name}: 已是最新 (last={last})")
+            return
+        params = {"start_date": start, "end_date": end, **self.extra_params}
+        logger.info(f"{self.table_name}: 窗口取数 {start}~{end}")
+        try:
+            df = getattr(self._pro, self.api_name)(**params)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"{self.table_name}: 接口报错 {type(exc).__name__}: {exc}")
+            return
+        if df is None or len(df) == 0:
+            logger.info(f"{self.table_name}: {start}~{end} 无数据")
+            return
+        self._flush([df], [], rt)
+        logger.info(
+            f"{self.table_name}: done {len(df):,} 行, {time.monotonic() - started:.0f}s"
+        )
+
     # ---- run -------------------------------------------------------------
     def run(self, rt: SyncRuntime, start_date: str | None = None,
             end_date: str | None = None) -> None:
         started = time.monotonic()
         if self.kind == "snapshot":
             self._run_snapshot(rt)
+            return
+        if self.kind == "window":
+            self._run_window(rt, start_date, end_date)
             return
 
         store = self.store
@@ -324,7 +394,7 @@ class BatchSyncJob(SyncJob):
                 logger.info(f"{self.spec.name}: {start}~{end} 分区已齐全 ({len(days)} 天)")
                 return
             logger.info(f"{self.spec.name}: {start}~{end} 需补 {len(todo)}/{len(days)} 天")
-            df, err = self._fetch_dates(todo)
+            df, err = self._fetch_dates(todo, rt=rt)
         elif self.kind == "stock":
             codes = self.codes
             if not codes:
@@ -340,13 +410,17 @@ class BatchSyncJob(SyncJob):
             logger.info(f"{self.spec.name}: {start}~{end} 需拉 {len(qs)} 个季度 {qs[0]}~{qs[-1]}")
             df, err = self._fetch_quarters(qs)
 
-        if df is None or len(df) == 0:
+        if df is None or (hasattr(df, "__len__") and len(df) == 0):
             msg = f"{self.spec.name} 无新数据: {err}"
             logger.warning(msg)
             rt.notifier.send(msg)
             return
 
-        df = clean_df(df)
+        if not isinstance(df, pd.DataFrame):
+            # _fetch_dates 返回的是最后一批未落盘的 DataFrame 列表
+            df = clean_df(pd.concat(df, ignore_index=True))
+        else:
+            df = clean_df(df)
         wrote = store.merge(df, date_col=self.date_col, name=self.spec.name)
         rt.meta.update_last_date(self.spec.name, end)
         elapsed = time.monotonic() - started
