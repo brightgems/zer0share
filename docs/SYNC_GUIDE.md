@@ -21,9 +21,9 @@
 一键同步全部，或按业务域分组同步：
 
 ```bash
-uv run python main.py sync --all             # 全部 62 张
+uv run python main.py sync --all             # 全部 63 张
 uv run python main.py sync --topic quote     # 行情 10 张
-uv run python main.py sync --topic finance   # 财务 11 张
+uv run python main.py sync --topic finance   # 财务 12 张
 uv run python main.py sync --topic futures   # 期货 11 张
 uv run python main.py sync --topic fund      # 基金与 ETF 8 张
 ```
@@ -39,7 +39,7 @@ uv run python main.py sync --topic fund      # 基金与 ETF 8 张
 
 ### 统一 `sync` 命令
 
-`sync` 是唯一公开入口。**所有 62 张表都是同一种 `SyncJob`**，共用同一套
+`sync` 是唯一公开入口。**所有 63 张表都是同一种 `SyncJob`**，共用同一套
 run / 游标 / 重试 / 通知 / 日期区间语义，写同一套 catalog 规范布局
 （时序表 `date=YYYYMMDD/data.parquet`，静态表 `data.parquet`，
 `index_weight` 两级分区 `index_code=*/date=*/`）。

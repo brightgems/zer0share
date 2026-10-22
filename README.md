@@ -95,16 +95,16 @@ print(pro.daily(ts_code='000001.SZ', start_date='20240101', end_date='20240131')
 
 同步顺序、逐表命令和定时调度部署见[同步指南](docs/SYNC_GUIDE.md)。
 
-## 数据覆盖（62 张表）
+## 数据覆盖（63 张表）
 
-`sync` 覆盖 Tushare 全部 62 张表，按业务域分 12 组。RiceQuant 分钟线 4 张为可选数据源，默认不启用。
+`sync` 覆盖 Tushare 全部 63 张表，按业务域分 12 组。RiceQuant 分钟线 4 张为可选数据源，默认不启用。
 
 | 分组 | 张数 | 表 |
 |------|-----|-----|
 | `quote` 行情 | 10 | `daily_kline` 日线、`weekly` 周线、`monthly` 月线、`adj_factor` 复权因子、`daily_basic` 每日指标、`stk_limit` 涨跌停价、`suspend_d` 停牌、`stock_st` ST 名单、`share_float` 限售解禁、`block_trade` 大宗交易 |
 | `fundflow` 资金流 | 4 | `moneyflow` 个股资金流、`margin` 融资融券汇总、`margin_detail` 融资融券明细、`hk_hold` 沪深港通持股 |
 | `toplist` 龙虎榜 | 2 | `top_list` 龙虎榜明细、`top_inst` 龙虎榜营业部 |
-| `finance` 财务 | 11 | `income` 利润表、`balancesheet` 资产负债表、`cashflow` 现金流量表、`fina_indicator` 财务指标、`dividend` 分红送股、`forecast` 业绩预告、`stk_holdernumber` 股东人数、`top10_holders` 十大股东、`top10_floatholders` 十大流通股东、`stk_managers` 管理层、`stk_rewards` 管理层薪酬 |
+| `finance` 财务 | 12 | `income` 利润表、`balancesheet` 资产负债表、`cashflow` 现金流量表、`fina_indicator` 财务指标、`dividend` 分红送股、`forecast` 业绩预告、`stk_holdernumber` 股东人数、`top10_holders` 十大股东、`top10_floatholders` 十大流通股东、`stk_managers` 管理层、`stk_rewards` 管理层薪酬、`stk_holdertrade` 股东增减持 |
 | `index` 指数与行业 | 7 | `index_daily` 指数行情、`index_weight` 指数成分权重、`index_dailybasic` 指数每日指标、`sw_daily` 申万行情、`idx_anns` 指数公告、`industry` 行业分类、`ci_member` 中信行业成分 |
 | `bond` 可转债 | 2 | `cb_basic` 可转债基础信息、`cb_daily` 可转债行情 |
 | `fund` 基金与 ETF | 8 | `fund_portfolio` 基金持仓、`fund_share` 基金份额、`fund_daily` 基金行情、`fund_adj` 基金复权因子、`etf_basic` ETF 基础信息、`etf_index` ETF 指数、`etf_share_size` ETF 份额规模、`etf_sh_cons` ETF 成分股 |
@@ -116,10 +116,10 @@ print(pro.daily(ts_code='000001.SZ', start_date='20240101', end_date='20240131')
 按分组同步：
 
 ```bash
-python -m zer0share sync --topic finance      # 财务 11 张
+python -m zer0share sync --topic finance      # 财务 12 张
 python -m zer0share sync --topic futures      # 期货 11 张
 python -m zer0share sync --tables income,daily_kline   # 指定多张
-python -m zer0share sync --all               # 全部 62 张
+python -m zer0share sync --all               # 全部 63 张
 ```
 
 `trade_cal`（交易日历）是全部逐日同步的基准，需先于其它表同步。
@@ -155,7 +155,7 @@ fut_bar = pro.fut_daily(ts_code="RB2410.SHFE", start_date="20240101", end_date="
 opt_bar = pro.opt_daily(ts_code="10004462.SH", start_date="20240101", end_date="20240131")
 ```
 
-全部 37 个查询方法、完整示例和冒烟测试见[本地查询 API 文档](docs/query-api.md)。
+全部 39 个查询方法、完整示例和冒烟测试见[本地查询 API 文档](docs/query-api.md)。
 
 仓库还内置 AI Skill（`skills/zer0share-data`），支持让 Codex、Claude Code 等智能体把中文自然语言数据请求转成本地查询流程。
 
@@ -163,10 +163,10 @@ opt_bar = pro.opt_daily(ts_code="10004462.SH", start_date="20240101", end_date="
 
 | 命令 | 说明 |
 |------|------|
-| `sync --table <name>` | 增量同步单个表（62 张表清单见上方[数据覆盖](#数据覆盖62-张表)） |
+| `sync --table <name>` | 增量同步单个表（63 张表清单见上方[数据覆盖](#数据覆盖63-张表)） |
 | `sync --tables a,b,c` | 同步多张表 |
 | `sync --topic <组名>` | 按业务域同步（`quote`/`finance`/`futures`/`fund`/`macro` 等 12 组） |
-| `sync --all` | 同步全部 62 张表 |
+| `sync --all` | 同步全部 63 张表 |
 | `sync --dry-run` | 只看计划，不联网、不写盘 |
 | `sync --stock` / `--etf` / `--futures` / `--options` | 旧版专题开关，等价对应 `--topic` |
 | `sync --ricequant` | 同步 RiceQuant 分钟线（可选，需 RiceQuant 账号） |
@@ -185,7 +185,7 @@ zer0share/
 ├── main.py           # CLI 入口
 ├── zer0share/
 │   ├── api.py        # 本地 Tushare-like 查询 API
-│   ├── catalog.py    # 本地表结构、路径和查询规格（62 张表的唯一权威）
+│   ├── catalog.py    # 本地表结构、路径和查询规格（63 张表的唯一权威）
 │   ├── cli.py        # Click CLI 实现
 │   ├── fetcher.py    # Tushare API 封装
 │   ├── pipeline.py   # 同步任务编排（SyncJob 注册表）
