@@ -24,10 +24,11 @@ A 股、ETF、期货、期权数据本地化管道：基于 [Tushare Pro](https:
 
 ## 特性
 
-- **A 股数据**：交易日历、基础信息、日线、复权因子、每日指标、ST、停复牌、涨跌停、指数成分、申万/中信行业、申万行业指数日线
+- **A 股数据**：交易日历、基础信息、日线、复权因子、每日指标、ST、停复牌、涨跌停、股东增减持、指数成分、申万/中信行业、申万行业指数日线
 - **ETF 数据**：ETF 基础信息、日线行情、复权因子、份额规模、持仓组合
 - **期货 & 期权数据**：期货合约、日线、持仓排名、仓单、结算、主连映射；期权合约与日线行情
 - **分钟线（可选）**：接入 RiceQuant 数据源同步股票 / ETF 分钟线
+- **新闻（可选）**：`major_news` 长篇通讯、`news` 快讯，存入 SQLite（去重、断点续跑、标题中文全文检索），可用单独的 Tushare 账号
 - **本地优先存储**：Parquet 分区文件 + DuckDB 元数据，无需数据库服务
 - **Tushare-like 查询**：本地 `pro_api()` 直接返回 DataFrame，不消耗 Tushare 积分
 - **复权行情**：本地 `pro_bar()` 支持不复权、前复权（qfq）和后复权（hfq）
@@ -169,6 +170,7 @@ opt_bar = pro.opt_daily(ts_code="10004462.SH", start_date="20240101", end_date="
 | `sync --dry-run` | 只看计划，不联网、不写盘 |
 | `sync --stock` / `--etf` / `--futures` / `--options` | 旧版专题开关，等价对应 `--topic` |
 | `sync --ricequant` | 同步 RiceQuant 分钟线（可选，需 RiceQuant 账号） |
+| `news sync --api major_news\|news --start-date <YYYYMMDD> [--src ...]` | 同步新闻到 `data/news/news.db`（原始返回归档在 `data/news/raw/`），已完成的日期自动跳过 |
 | `build-universe [--date / --start-date / --end-date]` | 构建股票池（详见[股票池文档](docs/universe.md)） |
 | `status` | 查看各表最后同步时间 |
 | `quality check [--all / --market / --table]` | 本地数据质检，报告写入 `reports/quality/` |

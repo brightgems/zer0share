@@ -39,6 +39,7 @@ from zer0share.schema import (
     RICEQUANT_ETF_BASIC_COLS,
     RICEQUANT_ETF_MINUTE_COLS,
     STOCK_ST_COLS,
+    STK_HOLDERTRADE_COLS,
     STK_LIMIT_COLS,
     SUSPEND_D_COLS,
     SHARE_FLOAT_COLS,
@@ -193,6 +194,20 @@ INDEX_WEIGHT_SPEC = TableSpec(
     order_by="index_code, con_code, trade_date",
     hive_partitioning=True,
     union_by_name=True,
+)
+
+STK_HOLDERTRADE_SPEC = DailyTableSpec(
+    name="stk_holdertrade",
+    path_parts=("stock", "stk_holdertrade"),
+    columns=STK_HOLDERTRADE_COLS,
+    parquet_pattern="date=*/data.parquet",
+    sync_table="stk_holdertrade",
+    order_by="ann_date DESC, ts_code, holder_name",
+    hive_partitioning=True,
+    union_by_name=True,
+    first_date="20060101",
+    date_column="ann_date",
+    code_column="ts_code",
 )
 
 IDX_ANNS_SPEC = DailyTableSpec(

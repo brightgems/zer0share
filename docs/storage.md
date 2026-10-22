@@ -28,6 +28,8 @@ data/
 │   │   └── date=YYYYMMDD/data.parquet
 │   ├── stk_limit/
 │   │   └── date=YYYYMMDD/data.parquet
+│   ├── stk_holdertrade/               # 股东增减持，按公告日（含周末）分区
+│   │   └── date=YYYYMMDD/data.parquet
 │   ├── industry/
 │   │   ├── sw_classify/data.parquet    # 申万行业分类树
 │   │   ├── sw_member/data.parquet      # 申万股票-行业映射（全量历史）
@@ -76,11 +78,14 @@ data/
 ├── options/                            # 期权数据
 │   ├── opt_basic/data.parquet          # 全量，每次覆盖
 │   └── opt_daily/date=YYYYMMDD/data.parquet
-└── ricequant/                          # RiceQuant 分钟线（可选数据源）
-    ├── basic/data.parquet
-    ├── stock_minute/date=YYYYMMDD/data.parquet
-    ├── etf_basic/data.parquet
-    └── etf_minute/date=YYYYMMDD/data.parquet
+├── ricequant/                          # RiceQuant 分钟线（可选数据源）
+│   ├── basic/data.parquet
+│   ├── stock_minute/date=YYYYMMDD/data.parquet
+│   ├── etf_basic/data.parquet
+│   └── etf_minute/date=YYYYMMDD/data.parquet
+└── news/                               # 新闻（可选，不用 Parquet 分区）
+    ├── news.db                         # SQLite 主库：去重、正文修订记录、抓取日志、标题全文索引
+    └── raw/{api}/{src}/YYYYMMDD.jsonl.gz  # 接口原始返回，只追加，主库损坏时可重建
 db/
 └── meta.duckdb                         # 同步记录 + 交易日历索引
 ```

@@ -1,10 +1,10 @@
 from zer0share.catalog import (
     ADJ_FACTOR_SPEC, BASIC_SPEC, DAILY_BASIC_SPEC, DAILY_KLINE_SPEC,
-    STK_LIMIT_SPEC, STOCK_ST_SPEC, SUSPEND_D_SPEC,
+    STK_HOLDERTRADE_SPEC, STK_LIMIT_SPEC, STOCK_ST_SPEC, SUSPEND_D_SPEC,
     SHARE_FLOAT_SPEC, BLOCK_TRADE_SPEC, MARGIN_SPEC,
 )
 from zer0share.storage import DailyPartitionStore, SnapshotStore
-from zer0share.sync._jobs import DailySyncJob, SnapshotSyncJob, SyncJob
+from zer0share.sync._jobs import CalendarDateSyncJob, DailySyncJob, SnapshotSyncJob, SyncJob
 
 
 def _part_dir(d, spec) -> DailyPartitionStore:
@@ -77,6 +77,13 @@ def build_jobs(cfg, fetcher) -> list[SyncJob]:
             table_name=MARGIN_SPEC.name, spec=MARGIN_SPEC,
             fetch=fetcher.fetch_margin,
             store=_part_dir(d, MARGIN_SPEC),
+            write_empty=True,
+        ),
+        # 公告日含周末，按自然日逐日拉
+        CalendarDateSyncJob(
+            table_name=STK_HOLDERTRADE_SPEC.name, spec=STK_HOLDERTRADE_SPEC,
+            fetch=fetcher.fetch_stk_holdertrade,
+            store=_part_dir(d, STK_HOLDERTRADE_SPEC),
             write_empty=True,
         ),
     ]

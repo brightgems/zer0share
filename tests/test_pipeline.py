@@ -218,7 +218,8 @@ def test_pipeline_registry_contains_all_tables(pipeline):
         # ---- job 引擎 ----
         "trade_cal",
         "basic", "daily_kline", "adj_factor", "daily_basic", "stock_st",
-        "suspend_d", "stk_limit", "index_weight", "index_daily", "idx_anns",
+        "suspend_d", "stk_limit",
+        "stk_holdertrade", "index_weight", "index_daily", "idx_anns",
         "share_float", "block_trade", "margin",
         "industry", "ci_member", "sw_daily",
         "fut_basic", "fut_daily", "fut_holding", "fut_wsr", "fut_settle",
@@ -235,7 +236,7 @@ def test_pipeline_registry_contains_all_tables(pipeline):
         "shibor", "repurchase", "cb_basic", "fund_share", "repo_daily",
     }
     assert set(pipeline.registry.keys()) == expected
-    assert len(pipeline.registry) == 62
+    assert len(pipeline.registry) == 63
 
 
 def test_opt_daily_spec_uses_option_market_first_date(pipeline):

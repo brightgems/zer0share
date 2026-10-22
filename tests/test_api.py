@@ -2046,3 +2046,46 @@ def test_idx_anns_query_raises_when_no_data(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="idx_anns"):
         api.idx_anns(ann_date="20260416")
+
+
+def _make_holdertrade_df():
+    return pd.DataFrame(
+        {
+            "ts_code": ["600519.SH", "300170.SZ", "300170.SZ", "000407.SZ"],
+            "ann_date": ["20250902", "20250915", "20250915", "20250915"],
+            "holder_name": ["中国贵州茅台酒厂(集团)有限责任公司", "陈迪清", "范建震", "阳光人寿"],
+            "holder_type": ["C", "G", "P", "C"],
+            "in_de": ["IN", "IN", "DE", "DE"],
+            "change_vol": [67821.0, 2766512.0, 2766512.0, 2464500.0],
+            "change_ratio": [0.0054, 0.284, 0.284, 0.2814],
+            "after_share": [679279397.0, 14787149.0, None, 41539641.0],
+            "after_ratio": [54.2438, 1.518, None, 4.7431],
+            "avg_price": [None, 17.67, 17.67, 3.6555],
+            "total_share": [679279397.0, 50849061.0, None, 41539641.0],
+        }
+    )
+
+
+def test_stk_holdertrade_filters_by_code_type_direction_and_dispatch(tmp_path):
+    data = _make_holdertrade_df()
+    store = DailyPartitionStore(tmp_path / "stock" / "stk_holdertrade")
+    for ann_date, part in data.groupby("ann_date"):
+        store.write(ann_date, part)
+
+    api = LocalPro(tmp_path)
+    increases = api.stk_holdertrade(
+        start_date="20250901", end_date="20250930", trade_type="IN", fields="ts_code,ann_date,holder_name"
+    )
+    assert increases.to_dict("records") == [
+        {"ts_code": "300170.SZ", "ann_date": "20250915", "holder_name": "陈迪清"},
+        {"ts_code": "600519.SH", "ann_date": "20250902", "holder_name": "中国贵州茅台酒厂(集团)有限责任公司"},
+    ]
+
+    companies = api.query(
+        "stk_holdertrade", ts_code="000407.SZ,600519.SH", start_date="20250901", holder_type="C",
+        fields="ts_code,in_de",
+    )
+    assert sorted(companies["ts_code"]) == ["000407.SZ", "600519.SH"]
+
+    one_day = api.stk_holdertrade(ann_date="20250915", fields="holder_name")
+    assert len(one_day) == 3

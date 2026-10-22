@@ -71,6 +71,12 @@ MARGIN_COLS = [
     "trade_date", "exchange_id", "name",
     "rzye", "rzmre", "rzche", "rqye", "rqmcl", "rqyl", "rzrqye",
 ]
+
+# 股东增减持 (stk_holdertrade) — 来自上游 PR #1
+STK_HOLDERTRADE_COLS = [
+    "ts_code", "ann_date", "holder_name", "holder_type", "in_de",
+    "change_vol", "change_ratio", "after_share", "after_ratio", "avg_price", "total_share",
+]
 INDEX_WEIGHT_COLS = ["index_code", "con_code", "trade_date", "weight"]
 INDEX_DAILY_COLS = [
     "ts_code", "trade_date", "open", "high", "low",

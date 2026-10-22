@@ -91,6 +91,18 @@ df = pro.query("daily", ts_code="000001.SZ", start_date="20240101", end_date="20
   - `adj` must be `None`, `"qfq"`, or `"hfq"`.
   - Moving averages via `ma` are not supported locally.
 
+## News
+
+Stored in SQLite (`data/news/news.db`), synced by `python main.py news sync --api <major_news|news> --start-date YYYYMMDD`.
+Dates are Beijing-time calendar dates, inclusive. `keyword` is a title full-text search and needs at least 3 characters.
+
+- `major_news(start_date, end_date, src=None, keyword=None, fields=None)`
+  - Long-form news. Fields: `title, content, pub_time, src, news_id, first_seen_at`; default `title, pub_time, src, news_id`.
+  - `content` is raw HTML and only present if synced with `--with-content`.
+- `news(start_date, end_date, src=None, keyword=None, fields=None)`
+  - Flash news. Fields: `datetime, title, content, channels, src, news_id, first_seen_at`; many items have an empty title, the text is in `content`.
+- Neither table carries stock codes; matching news to stocks is left to the caller.
+
 ## Industry
 
 - `index_classify(level=None, src=None, fields=None, limit=None, offset=None)`
@@ -164,7 +176,7 @@ df = pro.query("daily", ts_code="000001.SZ", start_date="20240101", end_date="20
 
 ## Unsupported Tushare Areas
 
-zer0share does not currently expose local finance statements, macro data, realtime quotes, news, announcements, non-ETF fund interfaces, Hong Kong stocks, or US stocks. If users ask for these, state that the local skill cannot answer from current synced zer0share data.
+zer0share does not currently expose local finance statements, macro data, realtime quotes, announcements, non-ETF fund interfaces, Hong Kong stocks, or US stocks. If users ask for these, state that the local skill cannot answer from current synced zer0share data.
 
 
 ## RiceQuant local API

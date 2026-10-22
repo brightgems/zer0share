@@ -68,7 +68,7 @@ JOB_TABLES: frozenset[str] = frozenset({
     # 股票维度小表 (job 侧有 retry + 通知, 且已按 catalog 路径落盘)
     "daily_kline", "adj_factor", "daily_basic",
     "stock_st", "share_float", "block_trade", "margin",
-    "stk_limit", "suspend_d",
+    "stk_limit", "suspend_d", "stk_holdertrade",
     # 指数 / 行业
     "index_daily", "idx_anns", "sw_daily", "ci_member", "industry",
     # ETF
@@ -91,6 +91,7 @@ TOPICS: dict[str, tuple[str, ...]] = {
     "quote": (
         "daily_kline", "weekly", "monthly", "adj_factor", "daily_basic",
         "stk_limit", "suspend_d", "stock_st", "share_float", "block_trade",
+        "margin", "stk_holdertrade",
     ),
     "fundflow": (
         "moneyflow",
@@ -148,8 +149,8 @@ LEGACY_FLAG_TABLES: dict[str, tuple[str, ...]] = {
     "stock": (
         "basic", "trade_cal", "daily_kline", "adj_factor", "daily_basic",
         "stock_st", "suspend_d", "stk_limit", "share_float", "block_trade",
-        "margin", "index_daily", "index_weight", "idx_anns", "industry",
-        "sw_daily", "ci_member",
+        "margin", "stk_holdertrade", "index_daily", "index_weight", "idx_anns",
+        "industry", "sw_daily", "ci_member",
     ),
     "futures": (
         "fut_basic", "fut_daily", "fut_holding", "fut_wsr", "fut_settle",
