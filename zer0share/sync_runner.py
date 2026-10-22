@@ -1,14 +1,13 @@
 """
 sync_runner.py — 统一 `sync` 命令的执行层。
 
-按 sync_plan.PLANS 的路由把每张表交给对应引擎:
-  * ENGINE_BULK → zer0share.bulk (缺口检测 + 内存安全原子合并)
-  * ENGINE_JOB  → zer0share.pipeline.Pipeline (日历驱动 + 重试 + 通知)
-
-两个引擎写同一套 catalog 规范布局, 因此可以混跑而不产生重复拷贝。
+所有表都是 zer0share.pipeline.Pipeline 里的 SyncJob (逐日型 DailySyncJob,
+或吸收 bulk 能力后的批量型 BatchSyncJob), 由同一套 run/游标/重试/通知驱动。
+原先按"bulk / job 两个引擎"分流的逻辑已随 bulk.py 删除而取消。
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -36,7 +35,6 @@ class SyncReport:
     done: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    bulk_exit: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -49,89 +47,6 @@ class SyncReport:
         if self.failed:
             parts.append(f"失败 {len(self.failed)} 张")
         return "｜".join(parts)
-
-
-def _bulk_table_specs(cfg, tables: list[str]):
-    """把 catalog 规范表名映射到 bulk 侧的注册项。
-
-    bulk 的注册表用旧表名 (daily / stock_basic), 这里双向映射:
-      catalog 名 → bulk 注册名 → 返回该 spec
-    bulk 里没有的表返回 None。
-    """
-    from zer0share.bulk import build_tables, dirs_for
-
-    specs = {s["name"]: s for s in build_tables(dirs_for(cfg), cfg)}
-    reverse = {SP.TABLE_ALIASES.get(k, k): v for k, v in specs.items()}
-    out = []
-    for t in tables:
-        spec = reverse.get(t)
-        if spec is not None:
-            out.append(spec)
-        else:
-            logger.debug(f"bulk 引擎无注册项: {t}")
-    return out
-
-
-def run_bulk_tables(cfg, tables: list[str], *, dry_run: bool = False,
-                    budget_seconds: float | None = None,
-                    start: str | None = None,
-                    end: str | None = None,
-                    include_missing: bool = False) -> tuple[list[str], list[str], int | None]:
-    """跑 bulk 引擎负责的表。
-
-    返回 (成功表名, 失败表名, bulk 退出码)。
-    直接复用 bulk.main 的循环逻辑, 但只跑给定的那几张表。
-    """
-    import datetime as dt
-    import time
-
-    from zer0share import bulk
-
-    specs = _bulk_table_specs(cfg, tables)
-    if not specs:
-        return [], [], None
-
-    bulk._DEADLINE = None
-    budget = None
-    if not dry_run:
-        budget = 780.0 if budget_seconds is None else float(budget_seconds)
-        bulk._DEADLINE = time.time() + budget
-
-    dirs = bulk.dirs_for(cfg)
-    pro = bulk.make_pro(cfg)
-    end_date = end or dt.datetime.now().strftime("%Y%m%d")
-    assert end_date is not None
-
-    # 注意: 不能用 class 体内赋值 — 类体不参与闭包作用域, `dry_run = dry_run`
-    # 在类体里是 NameError。用 SimpleNamespace 承载 argparse 风格的属性。
-    args = SimpleNamespace(
-        mode="incremental",
-        tables="",
-        topic="",
-        start=start,
-        end=end_date,
-        dry_run=dry_run,
-        include_missing=include_missing,
-        budget_seconds=budget,
-    )
-    ctx: dict = {}
-    done: list[str] = []
-    failed: list[str] = []
-    selected = bulk.order_tables(specs)
-    for spec in selected:
-        name = spec["name"]
-        canonical = SP.TABLE_ALIASES.get(name, name)
-        if budget is not None and bulk.budget_exhausted():
-            logger.info(f"⏭ {canonical}: DEFERRED(budget)")
-            continue
-        try:
-            status = bulk.run_incremental(pro, spec, args, end_date, ctx, dirs)
-            if status == "ok":
-                done.append(canonical)
-        except Exception as exc:  # noqa: BLE001 — 单表失败不应中断整批
-            logger.info(f"❌ {canonical}: {str(exc)[:160]}")
-            failed.append(canonical)
-    return done, failed, (0 if not failed else 1)
 
 
 def run_job_tables(cfg, tables: list[str], *, start_date: str | None = None,
@@ -234,15 +149,15 @@ def _lightweight_registry(cfg) -> dict:
     """不开 MetaStore/DuckDB 的轻量 job registry。
 
     只需要 job 的静态属性 (table_name / supports_date_range), 因此
-    build_jobs(cfg, fetcher) 就够了 —— 传一个哑 fetcher, 反正不会真调。
+    build_jobs(cfg, fetcher) + build_batch_jobs(cfg, fetcher) 就够了 ——
+    传一个真实 fetcher (build_jobs 需要它来绑 fetch 回调), 但 dry-run
+    路径下我们只读 job 的静态属性, 不会真正调用这些回调。
     用于 --dry-run 时的前置校验, 避免为读一个属性去抢 DuckDB 锁。
     """
     from zer0share.sources import DataSources, TushareFetcher
     from zer0share.sync import (calendar, stock, index, industry, futures,
-                                options, etf)
+                                options, etf, _batch_jobs)
 
-    # 用真实 fetcher 构造 (build_jobs 需要它来绑 fetch 回调), 但 dry-run
-    # 路径下我们只读 job 的静态属性, 不会真正调用这些回调。
     src = DataSources(
         tushare=TushareFetcher(cfg.tushare_token, cfg.tushare_http_url),
         ricequant=None,
@@ -254,6 +169,12 @@ def _lightweight_registry(cfg) -> dict:
                 reg[job.table_name] = job
         except Exception:  # noqa: BLE001 — 单个模块建不了不影响其他表
             continue
+    try:
+        codes = _batch_jobs.load_codes(cfg.data_dir)
+        for job in _batch_jobs.build_batch_jobs(cfg, src.tushare, codes):
+            reg[job.table_name] = job
+    except Exception:  # noqa: BLE001
+        pass
     return reg
 
 
@@ -312,18 +233,19 @@ def _run_job_tables_with(pipeline, tables: list[str], *,
 
 
 def partition_by_engine(tables: list[str]) -> tuple[list[str], list[str]]:
-    """按引擎把表清单分成 (bulk 表, job 表)。"""
-    bulk_tables, job_tables = [], []
+    """把表清单按取数方式分成 (批量取数表, 逐日/快照表)。
+
+    所有表都走同一个 Pipeline; 这个划分只用于日志分组与测试断言,
+    不再代表"不同的引擎" —— 原 bulk 引擎的能力已吸收进 BatchSyncJob。
+    """
+    batch_tables, job_tables = [], []
     for t in tables:
         canonical = SP.normalize_table(t)
-        plan = SP.PLANS.get(canonical)
-        if plan is None:
-            job_tables.append(canonical)
-        elif plan.is_bulk:
-            bulk_tables.append(canonical)
+        if canonical in SP.BULK_TABLES:
+            batch_tables.append(canonical)
         else:
             job_tables.append(canonical)
-    return bulk_tables, job_tables
+    return batch_tables, job_tables
 
 
 def run_sync(cfg, tables: list[str], *, start_date: str | None = None,
@@ -339,22 +261,17 @@ def run_sync(cfg, tables: list[str], *, start_date: str | None = None,
       而不是报错中断 —— --all / --topic 展开的场景下, 关掉的数据源本就不该
       同步, 报错会让整条命令不可用。
     strict=True: 用户显式 --table 指定了表, 不存在就是配置/拼写问题, 必须报错。
+
+    budget_seconds: 批量取数表的整体时间预算。超预算后剩余表不再启动,
+      记入 skipped (DEFERRED), 不算失败 —— 下次 sync 继续补。原 bulk 引擎的
+      780 秒预算语义, 吸收后保留在 job 侧。
     """
     report = SyncReport()
     canonical = [SP.normalize_table(t) for t in tables]
-    bulk_tables, job_tables = partition_by_engine(canonical)
+    batch_tables, job_tables = partition_by_engine(canonical)
 
     logger.info(f"统一 sync: 共 {len(canonical)} 张表 "
-                f"(bulk 引擎 {len(bulk_tables)} / job 引擎 {len(job_tables)})")
-
-    if bulk_tables:
-        logger.info(f"→ bulk 引擎: {', '.join(bulk_tables)}")
-        b_done, b_failed, exit_code = run_bulk_tables(
-            cfg, bulk_tables, dry_run=dry_run, budget_seconds=budget_seconds,
-            start=start_date, end=end_date, include_missing=include_missing)
-        report.done.extend(b_done)
-        report.failed.extend(b_failed)
-        report.bulk_exit = exit_code
+                f"(批量取数 {len(batch_tables)} / 逐日快照 {len(job_tables)})")
 
     if job_tables:
         logger.info(f"→ job 引擎: {', '.join(job_tables)}")
@@ -364,6 +281,21 @@ def run_sync(cfg, tables: list[str], *, start_date: str | None = None,
                                           pipeline_factory=pipeline_factory)
         report.done.extend(j_done)
         report.failed.extend(j_failed)
+
+    if batch_tables:
+        started = time.time()
+        for name in batch_tables:
+            if (budget_seconds is not None and not dry_run
+                    and time.time() - started >= budget_seconds):
+                logger.info(f"⏭ {name}: DEFERRED(budget)")
+                report.skipped.append(name)
+                continue
+            b_done, b_failed = run_job_tables(cfg, [name], start_date=start_date,
+                                              end_date=end_date, dry_run=dry_run,
+                                              strict=strict,
+                                              pipeline_factory=pipeline_factory)
+            report.done.extend(b_done)
+            report.failed.extend(b_failed)
 
     logger.info(f"统一 sync 结束: {report.summary()}")
     return report

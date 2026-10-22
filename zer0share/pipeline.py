@@ -17,10 +17,17 @@ class Pipeline:
 
     def _build_registry(self, cfg: Config, sources: DataSources) -> None:
         from zer0share.sync import calendar, stock, index, industry, futures, options, ricequant, etf
+        from zer0share.sync._batch_jobs import build_batch_jobs, load_codes
         for module in [calendar, stock, index, industry, futures, options, etf]:
             for job in module.build_jobs(cfg, sources.tushare):
                 self._registry[job.table_name] = job
         for job in ricequant.build_jobs(cfg, sources):
+            self._registry[job.table_name] = job
+        # 吸收 bulk 后的批量取数表: 原 bulk.build_tables 注册项, 现已改为
+        # BatchSyncJob, 与 job 引擎共用同一套 run/游标/通知/日期区间语义。
+        # 逐只拉取的表需要 ts_code 清单, 从 stock/basic 快照读取。
+        codes = load_codes(cfg.data_dir)
+        for job in build_batch_jobs(cfg, sources.tushare, codes):
             self._registry[job.table_name] = job
 
     def run(self, table_name: str, start_date: str | None = None, end_date: str | None = None) -> None:

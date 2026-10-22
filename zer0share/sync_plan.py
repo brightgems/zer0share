@@ -1,30 +1,27 @@
 """
-sync_plan.py — 统一 `sync` 命令的表清单与引擎路由。
+sync_plan.py — 统一 `sync` 命令的表清单与取数方式。
 
 背景: 历史上 `sync` (zer0share.sync, 每日分区 + MetaStore 记账) 与
 `sync-bulk` (zer0share.bulk, 原 download_all_v2 的增量语义) 是两套并行命令,
 表名不同 (bulk `daily` ↔ catalog `daily_kline`)、落盘规范不同 (单文件 vs
 date=* 分区), 造成同一份数据两个拷贝、query 读不到其中一份。
 
-现在两套都写 catalog 声明的规范布局 (catalog.parquet_pattern 是唯一权威),
-因此合并成**一个** `sync` 命令:
+现在所有表都写 catalog 声明的规范布局 (catalog.parquet_pattern 是唯一权威),
+原 bulk 的取数能力已吸收进 job 引擎的 BatchSyncJob, bulk.py 已删除,
+只保留**一个** `sync` 命令:
   - 表名统一用 catalog 名字 (daily_kline / basic / …)
-  - 每张表按能力路由到对应引擎:
-      * ENGINE_BULK — bulk 引擎: 缺口检测 + 内存安全的原子合并, 适合
-        "按日/按股票/按代码" 的大表, 以及 bulk 独有的表
-      * ENGINE_JOB  — job 引擎 (zer0share.sync): 交易日历驱动 + 重试 +
-        通知, 适合快照表 / 多交易所 / 期货期权 ETF
-  - 两引擎都写 date=* 分区或 data.parquet, 互不冲突。
-
-ENGINE_BULK / ENGINE_JOB 只是"谁来拉数据"的分工, 不影响落盘格式。
+  - 每张表都是 SyncJob, 共用同一套 run/游标/重试/通知/日期区间语义;
+    取数方式由 job 自身决定 (DailySyncJob 逐日, BatchSyncJob 批量)。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 # ------------------------------------------------------------------ 引擎标识
-ENGINE_BULK = "bulk"   # zer0share.bulk: 缺口检测 + 原子合并 + 内存安全
-ENGINE_JOB = "job"     # zer0share.sync: 日历驱动 + 重试 + 通知
+# bulk.py 已删除: 取数能力吸收进 BatchSyncJob, 所有表都是 SyncJob。
+# 保留这两个常量仅为兼容旧 import (cli/sync_runner 会 import 它们)。
+ENGINE_BULK = "job"   # 已合并: 原 bulk 表现由 BatchSyncJob 承担
+ENGINE_JOB = "job"    # 原 job 引擎
 
 # ------------------------------------------------------------------ 表别名
 # 旧命令的表名 → catalog 规范名。保留别名是为了不破坏既有脚本/习惯用法。
@@ -38,47 +35,40 @@ TABLE_ALIASES: dict[str, str] = {
     "sw_member": "industry",
 }
 
-# bulk 引擎负责的表 (catalog 名)。
+# 原 bulk 引擎负责的表 (catalog 名), 现已由 BatchSyncJob 承担。
 #
-# 判定依据 (来自代码/磁盘事实, 不是猜测):
+# 保留这份名单的用途: (1) `sync --topic` 的主题分组仍要覆盖这些表;
+# (2) `sync_runner` 用它判断"哪些表是批量取数方式", 以便在 job 侧启用
+# 磁盘缺口检测与批量写入路径。
 #
-#   1. bulk 独有的表 — job 注册表里根本没有 (财报/资金流/港股/宏观/可转债 …)
-#   2. 两边都有、且 bulk 侧实现更贴合的日频表:
-#      bulk 按磁盘 parquet footer 统计做**缺口检测**(只读 row group 统计, 不整表
-#      载入); job 侧依赖 MetaStore 记账 — 记账表为空时会从 first_date 全量重下。
-#      这几张表磁盘已有多年历史, 交给 bulk 才能只补缺口。
-#
-# 明确不归 bulk 的例外 (交给 job 引擎):
-#   - basic / etf_basic / opt_basic 等快照表 (无日期维度)
-#   - index_weight (index_code=*/date=*/ 两级分区, 只有 IndexWeightStore 会写)
-#   - trade_cal (exchange=*/ 布局)
-#   - index_daily / sw_daily: bulk 侧仍写历史单文件位置
-#     (stock/index_daily.parquet 等), 与 catalog 规范位置冲突
+# 明确排除的表 (不在任何主题/注册表里):
+#   - us_daily / moneyflow_ind / moneyflow_hsgt: Tushare 接口未开通或超出
+#     积分范围 (实测 api_scope_denied / api_not_enabled), 注册只会让 sync 空跑
+#   - fund_nav: 历史只抓单只 ETF, 全市场拉取需显式 symbol 枚举, 默认跳过
 BULK_TABLES: frozenset[str] = frozenset({
-    # ── 两边都有, 走 bulk (缺口检测更准) ──
-    "daily_kline", "adj_factor", "daily_basic",
-    "stk_limit", "suspend_d",
-    # ── bulk 独有 ──
     "weekly", "monthly",
-    "moneyflow", "moneyflow_ind", "moneyflow_hsgt",
+    "moneyflow",
     "margin_detail", "hk_hold", "top_list", "top_inst",
     "income", "balancesheet", "cashflow", "fina_indicator", "dividend",
     "forecast", "stk_holdernumber", "top10_holders", "top10_floatholders",
     "stk_managers", "stk_rewards",
     "cb_basic", "cb_daily",
-    "fund_nav", "fund_portfolio", "fund_share",
-    "us_daily",
+    "fund_portfolio", "fund_share",
     "shibor", "repurchase", "repo_daily",
     "index_dailybasic",
 })
 
-# job 引擎负责的表 (catalog 名)。剩下的全部归 job 引擎:
-#   快照表 (无日期维度) / 期货 / 期权 / ETF / 行业分类 / 自然日表 / 多交易所表
+# 全部表都归 job 引擎 (每张表都是 SyncJob): 快照表 / 期货 / 期权 / ETF /
+# 行业分类 / 自然日表 / 多交易所表 / 吸收 bulk 后的批量取数表。
+# 原 BULK_TABLES 中的表已在 pipeline registry 注册为 BatchSyncJob,
+# 这里列出的是**逐日/快照型** job, 便于 `sync --topic` 反查与文档说明。
 JOB_TABLES: frozenset[str] = frozenset({
     # 快照 / 日历 / 两级分区
     "basic", "trade_cal", "index_weight",
     # 股票维度小表 (job 侧有 retry + 通知, 且已按 catalog 路径落盘)
+    "daily_kline", "adj_factor", "daily_basic",
     "stock_st", "share_float", "block_trade", "margin",
+    "stk_limit", "suspend_d",
     # 指数 / 行业
     "index_daily", "idx_anns", "sw_daily", "ci_member", "industry",
     # ETF
@@ -103,7 +93,7 @@ TOPICS: dict[str, tuple[str, ...]] = {
         "stk_limit", "suspend_d", "stock_st", "share_float", "block_trade",
     ),
     "fundflow": (
-        "moneyflow", "moneyflow_ind", "moneyflow_hsgt",
+        "moneyflow",
         "margin", "margin_detail", "hk_hold",
     ),
     "toplist": ("top_list", "top_inst"),
@@ -118,11 +108,10 @@ TOPICS: dict[str, tuple[str, ...]] = {
     ),
     "bond": ("cb_basic", "cb_daily"),
     "fund": (
-        "fund_nav", "fund_portfolio", "fund_share",
+        "fund_portfolio", "fund_share",
         "fund_daily", "fund_adj", "etf_basic", "etf_index",
         "etf_share_size", "etf_sh_cons",
     ),
-    "us": ("us_daily",),
     "macro": ("shibor", "repurchase", "repo_daily"),
     "futures": (
         "fut_basic", "fut_daily", "fut_holding", "fut_wsr", "fut_settle",
@@ -184,17 +173,18 @@ ALL_TOPICS: tuple[str, ...] = tuple(TOPICS)
 @dataclass(frozen=True)
 class TablePlan:
     """一张表在统一 sync 中的计划。"""
-    name: str                 # catalog 规范名
-    engine: str               # ENGINE_BULK / ENGINE_JOB
-    topics: tuple[str, ...] = field(default=())   # 所属主题
+    name: str                       # catalog 规范名
+    topics: tuple[str, ...] = field(default_factory=tuple)   # 所属主题
 
     @property
-    def is_bulk(self) -> bool:
-        return self.engine == ENGINE_BULK
+    def is_batch(self) -> bool:
+        """批量取数表 (吸收原 bulk 引擎的 BatchSyncJob)。"""
+        return self.name in BULK_TABLES
 
     @property
     def is_job(self) -> bool:
-        return self.engine == ENGINE_JOB
+        """逐日 / 快照型 job。"""
+        return not self.is_batch
 
 
 def normalize_table(name: str) -> str:
@@ -222,26 +212,14 @@ def _build_plans() -> dict[str, TablePlan]:
 
     plans: dict[str, TablePlan] = {}
     for name in sorted(set(by_topic) | BULK_TABLES | JOB_TABLES):
-        if name in BULK_TABLES:
-            engine = ENGINE_BULK
-        elif name in JOB_TABLES:
-            engine = ENGINE_JOB
-        else:
-            # 没在任何一组里 → 默认交给 job 引擎 (它是通用日历驱动实现)
-            engine = ENGINE_JOB
         plans[name] = TablePlan(
             name=name,
-            engine=engine,
             topics=tuple(sorted(by_topic.get(name, ()))),
         )
     return plans
 
 
 PLANS: dict[str, TablePlan] = _build_plans()
-
-
-def engine_of(name: str) -> str:
-    return PLANS[normalize_table(name)].engine
 
 
 def table_names() -> list[str]:
@@ -261,5 +239,8 @@ def all_table_names() -> list[str]:
 
 
 def bulk_table_names() -> list[str]:
-    """需要交给 bulk 引擎的表名 (已归一为 catalog 名)。"""
-    return [n for n, p in PLANS.items() if p.is_bulk]
+    """批量取数方式的表名 (已归一为 catalog 名)。
+
+    原 bulk 引擎的表, 现由 BatchSyncJob 承担, 与 job 引擎共用 Pipeline。
+    """
+    return sorted(BULK_TABLES)

@@ -35,46 +35,42 @@ def _mock_pipeline_for(tables, supports_date_range_for=None):
 
 
 def _job_tables():
-    """job 引擎负责的表 (catalog 规范名, 不含别名)。"""
+    """逐日 / 快照型 job 表 (catalog 规范名, 不含别名)。"""
     from zer0share import sync_plan as SP
 
     return sorted(t for t, p in SP.PLANS.items() if p.is_job)
 
 
 def _bulk_tables():
-    """bulk 引擎负责的表 (catalog 规范名)。"""
+    """批量取数型表 (吸收原 bulk 引擎, 现为 BatchSyncJob)。"""
     from zer0share import sync_plan as SP
 
-    return sorted(t for t, p in SP.PLANS.items() if p.is_bulk)
+    return sorted(t for t, p in SP.PLANS.items() if p.is_batch)
 
 
 def _sync_env(pipeline, tmp_path=None):
     """构造统一 sync 需要的 patch 环境。
 
-    - `_make_pipeline` → mock pipeline (job 引擎)
-    - `run_bulk_tables` → mock (bulk 引擎, 避免真实联网)
+    - `_make_pipeline` → mock pipeline (所有表都走它, 包括批量取数表)
     - `load_config` → mock cfg (避免依赖真实 settings.toml)
     """
     cfg = MagicMock()
     cfg.log_path = Path(tmp_path or "/tmp") / "zer0share-test.log"
     cfg.data_dir = str(tmp_path or "/tmp")
 
-    bulk_runner = MagicMock(return_value=([], [], 0))
-
     patches = [
         patch("zer0share.cli._make_pipeline", return_value=pipeline),
-        patch("zer0share.sync_runner.run_bulk_tables", bulk_runner),
         patch("zer0share.cli.load_config", return_value=cfg),
     ]
-    return patches, bulk_runner
+    return patches
 
 
 def _invoke_sync(argv, pipeline, tmp_path=None):
-    """跑一次 sync 命令, 返回 (result, bulk_runner)。"""
-    patches, bulk_runner = _sync_env(pipeline, tmp_path)
-    with patches[0], patches[1], patches[2]:
+    """跑一次 sync 命令, 返回 result。"""
+    patches = _sync_env(pipeline, tmp_path)
+    with patches[0], patches[1]:
         result = CliRunner().invoke(cli, ["sync", *argv])
-    return result, bulk_runner
+    return result
 
 
 # ------------------------------------------------------------------ 参数校验
@@ -108,76 +104,71 @@ def test_sync_rejects_unknown_topic():
     assert "未知主题" in result.output
 
 
-# ------------------------------------------------------------------ 引擎路由
-def test_sync_bulk_table_goes_to_bulk_engine():
-    """daily_kline 归 bulk 引擎 — 不应出现在 pipeline.run 里。"""
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--table", "daily_kline"], pipeline)
+# ------------------------------------------------------------------ 统一引擎
+def test_sync_batch_table_goes_through_pipeline():
+    """daily_kline 现为 job 引擎的表 — 与其它表一样走 pipeline.run。"""
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--table", "daily_kline"], pipeline)
 
     assert result.exit_code == 0
-    assert bulk_runner.call_count == 1
-    assert bulk_runner.call_args.args[1] == ["daily_kline"]
-    assert not pipeline.run.called
+    pipeline.run.assert_called_once_with(
+        "daily_kline", start_date=None, end_date=None)
 
 
-def test_sync_job_table_goes_to_job_engine():
-    """industry 归 job 引擎 — 应通过 pipeline.run 执行。"""
+def test_sync_job_table_goes_through_pipeline():
+    """industry 逐日型 — 通过 pipeline.run 执行。"""
     pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--table", "industry"], pipeline)
+    result = _invoke_sync(["--table", "industry"], pipeline)
 
     assert result.exit_code == 0
     pipeline.run.assert_called_once_with("industry", start_date=None, end_date=None)
-    assert bulk_runner.call_count == 0
 
 
-def test_sync_routes_both_engines():
-    """一张 bulk 表 + 一张 job 表 → 两个引擎各走各的。"""
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(
-        ["--tables", "daily_kline,industry"], pipeline
-    )
+def test_sync_mixed_tables_all_go_through_pipeline():
+    """批量取数表 + 逐日表 → 都走同一个 pipeline, 不再分引擎。"""
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--tables", "daily_kline,industry"], pipeline)
 
     assert result.exit_code == 0
-    assert bulk_runner.call_args.args[1] == ["daily_kline"]
-    pipeline.run.assert_called_once_with("industry", start_date=None, end_date=None)
+    called = [c.args[0] for c in pipeline.run.call_args_list]
+    assert set(called) == {"daily_kline", "industry"}
 
 
-def test_sync_all_covers_both_engines():
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--all"], pipeline)
+def test_sync_all_covers_every_table():
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--all"], pipeline)
 
     assert result.exit_code == 0
-    bulk_tables = bulk_runner.call_args.args[1]
-    job_called = {c.args[0] for c in pipeline.run.call_args_list}
-    assert "daily_kline" in bulk_tables
-    assert "industry" in job_called
+    called = {c.args[0] for c in pipeline.run.call_args_list}
+    assert "daily_kline" in called
+    assert "industry" in called
 
 
 # ------------------------------------------------------------------ 别名
 def test_sync_accepts_legacy_table_alias():
     """旧 bulk 表名 `daily` 归一到 catalog 名 `daily_kline`。"""
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--table", "daily"], pipeline)
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--table", "daily"], pipeline)
 
     assert result.exit_code == 0
-    assert bulk_runner.call_args.args[1] == ["daily_kline"]
+    pipeline.run.assert_called_once_with(
+        "daily_kline", start_date=None, end_date=None)
 
 
 def test_sync_accepts_legacy_stock_basic_alias():
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--table", "stock_basic"], pipeline)
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--table", "stock_basic"], pipeline)
 
     assert result.exit_code == 0
-    # basic 是快照表 → job 引擎
+    # basic 是快照表
     pipeline.run.assert_called_once_with("basic", start_date=None, end_date=None)
-    assert bulk_runner.call_count == 0
 
 
 # ------------------------------------------------------------------ 主题 / 旧开关
 def test_sync_stock_flag_includes_idx_anns():
     """旧 `--stock` 开关保持原语义 (含 idx_anns)。"""
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(["--stock"], pipeline)
+    result = _invoke_sync(["--stock"], pipeline)
 
     assert result.exit_code == 0
     called = [c.args[0] for c in pipeline.run.call_args_list]
@@ -187,7 +178,7 @@ def test_sync_stock_flag_includes_idx_anns():
 def test_sync_etf_flag_calls_etf_tables():
     """旧 `--etf` 开关保持原表清单与顺序。"""
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(["--etf"], pipeline)
+    result = _invoke_sync(["--etf"], pipeline)
 
     assert result.exit_code == 0
     assert [c.args[0] for c in pipeline.run.call_args_list] == [
@@ -201,45 +192,43 @@ def test_sync_etf_flag_calls_etf_tables():
 
 
 def test_sync_topic_and_table_are_unioned():
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(
         ["--topic", "finance", "--table", "industry"], pipeline
     )
 
     assert result.exit_code == 0
-    bulk_tables = bulk_runner.call_args.args[1]
-    job_called = {c.args[0] for c in pipeline.run.call_args_list}
-    assert "moneyflow" not in bulk_tables
-    assert "income" in bulk_tables
-    assert "industry" in job_called
+    called = {c.args[0] for c in pipeline.run.call_args_list}
+    assert "income" in called
+    assert "industry" in called
 
 
 def test_sync_topic_all_expands_all_topics():
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(["--topic", "all"], pipeline)
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(["--topic", "all"], pipeline)
 
     assert result.exit_code == 0
-    bulk_tables = bulk_runner.call_args.args[1]
-    assert set(_bulk_tables()) <= set(bulk_tables)
+    called = {c.args[0] for c in pipeline.run.call_args_list}
+    assert set(_bulk_tables()) <= called
 
 
 # ------------------------------------------------------------------ 日期区间
 def test_sync_daily_kline_accepts_date_range():
-    pipeline = _mock_pipeline_for(_job_tables())
-    result, bulk_runner = _invoke_sync(
+    pipeline = _mock_pipeline_for(_job_tables() + _bulk_tables())
+    result = _invoke_sync(
         ["--table", "daily_kline", "--start-date", "20160101", "--end-date", "20160131"],
         pipeline,
     )
 
     assert result.exit_code == 0
-    kwargs = bulk_runner.call_args.kwargs
-    assert kwargs["start"] == "20160101"
-    assert kwargs["end"] == "20160131"
+    pipeline.run.assert_called_once_with(
+        "daily_kline", start_date="20160101", end_date="20160131"
+    )
 
 
 def test_sync_industry_rejects_date_range():
     pipeline = _mock_pipeline_for(_job_tables(), supports_date_range_for=set())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "industry", "--start-date", "20240101"], pipeline
     )
 
@@ -249,7 +238,7 @@ def test_sync_industry_rejects_date_range():
 
 def test_sync_etf_basic_rejects_date_range():
     pipeline = _mock_pipeline_for(_job_tables(), supports_date_range_for=set())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "etf_basic", "--start-date", "20240101"], pipeline
     )
 
@@ -259,7 +248,7 @@ def test_sync_etf_basic_rejects_date_range():
 
 def test_sync_etf_index_rejects_date_range():
     pipeline = _mock_pipeline_for(_job_tables(), supports_date_range_for=set())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "etf_index", "--start-date", "20240101"], pipeline
     )
 
@@ -269,7 +258,7 @@ def test_sync_etf_index_rejects_date_range():
 
 def test_sync_fut_basic_rejects_date_range():
     pipeline = _mock_pipeline_for(_job_tables(), supports_date_range_for=set())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fut_basic", "--start-date", "20240101"], pipeline
     )
 
@@ -279,7 +268,7 @@ def test_sync_fut_basic_rejects_date_range():
 
 def test_sync_opt_basic_rejects_date_range():
     pipeline = _mock_pipeline_for(_job_tables(), supports_date_range_for=set())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "opt_basic", "--start-date", "20240101"], pipeline
     )
 
@@ -289,7 +278,7 @@ def test_sync_opt_basic_rejects_date_range():
 
 def test_sync_index_daily_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "index_daily", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -302,7 +291,7 @@ def test_sync_index_daily_accepts_date_range():
 
 def test_sync_idx_anns_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "idx_anns", "--start-date", "20260401", "--end-date", "20260430"],
         pipeline,
     )
@@ -315,7 +304,7 @@ def test_sync_idx_anns_accepts_date_range():
 
 def test_sync_fut_daily_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fut_daily", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -328,7 +317,7 @@ def test_sync_fut_daily_accepts_date_range():
 
 def test_sync_ft_limit_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "ft_limit", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -341,7 +330,7 @@ def test_sync_ft_limit_accepts_date_range():
 
 def test_sync_fut_weekly_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fut_weekly", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -354,7 +343,7 @@ def test_sync_fut_weekly_accepts_date_range():
 
 def test_sync_fut_weekly_detail_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fut_weekly_detail", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -367,7 +356,7 @@ def test_sync_fut_weekly_detail_accepts_date_range():
 
 def test_sync_opt_daily_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "opt_daily", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -380,7 +369,7 @@ def test_sync_opt_daily_accepts_date_range():
 
 def test_sync_fund_daily_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fund_daily", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -393,7 +382,7 @@ def test_sync_fund_daily_accepts_date_range():
 
 def test_sync_fund_adj_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "fund_adj", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -406,7 +395,7 @@ def test_sync_fund_adj_accepts_date_range():
 
 def test_sync_etf_share_size_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "etf_share_size", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -419,7 +408,7 @@ def test_sync_etf_share_size_accepts_date_range():
 
 def test_sync_etf_sh_cons_accepts_date_range():
     pipeline = _mock_pipeline_for(_job_tables())
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "etf_sh_cons", "--start-date", "20240101", "--end-date", "20240131"],
         pipeline,
     )
@@ -496,7 +485,7 @@ def test_sync_rejects_table_missing_from_registry():
     registry = [t for t in _job_tables() if not t.startswith("ricequant")]
     pipeline = _mock_pipeline_for(registry)
 
-    result, _bulk_runner = _invoke_sync(
+    result = _invoke_sync(
         ["--table", "ricequant_basic", "--dry-run"], pipeline
     )
 
@@ -510,7 +499,7 @@ def test_sync_rejects_missing_registry_table_without_dry_run():
     registry = [t for t in _job_tables() if not t.startswith("ricequant")]
     pipeline = _mock_pipeline_for(registry)
 
-    result, _bulk_runner = _invoke_sync(["--table", "ricequant_basic"], pipeline)
+    result = _invoke_sync(["--table", "ricequant_basic"], pipeline)
 
     assert result.exit_code != 0
     assert "ricequant_basic" in result.output

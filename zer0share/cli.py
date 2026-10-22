@@ -17,11 +17,15 @@ from zer0share import sync_plan as SP
 from zer0share.universe import build_universes, build_universes_range
 
 
-def bulk_budget_default() -> float:
-    """bulk 引擎默认时间预算 (秒)。"""
-    from zer0share.bulk import DEFAULT_BUDGET_SECONDS
+# 批量取数表的默认时间预算 (秒)。原 bulk 引擎的 DEFAULT_BUDGET_SECONDS
+# 已随 bulk.py 删除, 这里保留同一数值与语义: 超出预算后剩余表不再启动
+# (本次运行视为 DEFERRED, 不算失败), 下次 sync 继续补。
+DEFAULT_BUDGET_SECONDS = 780.0
 
-    return float(DEFAULT_BUDGET_SECONDS)
+
+def bulk_budget_default() -> float:
+    """批量取数表的默认时间预算 (秒)。"""
+    return DEFAULT_BUDGET_SECONDS
 
 
 def _validate_date(ctx, param, value):
@@ -178,12 +182,13 @@ def sync(
 ) -> None:
     """同步数据 (统一入口)。
 
-    表名统一用 catalog 规范名, 每张表按能力自动路由到对应引擎:
-      * bulk 引擎 — 缺口检测 + 内存安全的原子合并, 适合大表与 bulk 独有表
-      * job 引擎  — 交易日历驱动 + 重试 + 通知, 适合快照表/期货/期权/ETF
+    所有表都是 pipeline 里的 SyncJob, 由同一套 run/游标/重试/通知驱动:
+      * 逐日型 (DailySyncJob) — 按交易日历逐日拉取
+      * 批量型 (BatchSyncJob) — 多日/多股一次拉取后合并写入分区
+        (吸收原 bulk 引擎的取数能力, 不再是独立引擎)
 
-    两引擎写同一套 catalog 规范布局 (时序表 date=YYYYMMDD/data.parquet,
-    静态表 data.parquet), 因此混跑不会产生重复拷贝。
+    统一写 catalog 规范布局 (时序表 date=YYYYMMDD/data.parquet,
+    静态表 data.parquet), 不再有单文件与分区并存的旧格式。
 
     例:
       zer0share sync --all
